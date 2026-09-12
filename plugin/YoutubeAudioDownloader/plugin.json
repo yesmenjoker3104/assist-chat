@@ -1,0 +1,33 @@
+{
+  "name": "YoutubeAudioDownloader",
+  "version": "1.0.0",
+  "description": "YouTube等からの動画・音声ダウンロード",
+  "executable": "YoutubeAudioDownloaderCli.exe",
+  "actions": [
+    {
+      "action": "download_video",
+      "prompt_hint": "動画・音声ダウンロード（YouTubeから曲をダウンロードして・この動画を保存して・音声だけ欲しい・mp3で取得して・ステムに分離して）",
+      "prompt_example": {
+        "action": "download_video",
+        "url": "https://youtu.be/...",
+        "urls": [],
+        "audio_only": true,
+        "output_dir": null
+      },
+      "prompt_notes": "URLが1つの場合はurl、複数の場合はurlsリストに指定。音楽・音声のみはaudio_only:true、動画ごと欲しい場合はaudio_only:false。",
+      "command": { "subcommands": [], "args": [] },
+      "handler": "builtin:download_video",
+      "display": "progress"
+    },
+    {
+      "action": "download_history",
+      "prompt_hint": "ダウンロード履歴（過去にダウンロードした曲・動画を確認したい・履歴を見せて）",
+      "prompt_example": { "action": "download_history" },
+      "command": { "subcommands": ["history"], "args": [] },
+      "handler": "plugin",
+      "display": "table",
+      "display_field": "entries",
+      "display_columns": ["title", "downloaded", "mp3_path"]
+    }
+  ]
+}

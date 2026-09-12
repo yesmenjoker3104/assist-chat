@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -41,6 +42,7 @@ def _to_rich(text: str) -> str:
 SYSTEM_PROMPT_TEMPLATE = """あなたはアシスタントです。
 ユーザーの依頼をJSONだけで返してください。説明文やMarkdownは不要です。
 {plugin_actions}
+    モデル切り替え: {{ "action": "model_switch", "model": "モデル名（例:llama3.2:3b）" }}
     会話履歴削除: {{ "action": "chat_history_delete" }}
     通常の質問: {{ "action": "chat", "reply": "回答" }}
 現在日時: {now}
@@ -177,6 +179,9 @@ class ChatWidget(QWidget):
         self._prompt_history_index = -1
         self._prompt_history_draft = ""
         self._prompt_suggestions_visible = False
+        self._bubble_texts = {}
+        self._search_match_bubbles = []
+        self._search_match_index = -1
         self.thread = None
         self.display_thread = None
         self._display_pending = False
@@ -200,14 +205,20 @@ class ChatWidget(QWidget):
         if self.tech_news and tech_news_auto_fetch_enabled:
             self.tech_news_timer.start()
         self._build_ui()
+        self.search_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.search_shortcut.activated.connect(self._toggle_history_search)
         self._load_prompt_history()
         self._restore_initial_history()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         history_controls = QHBoxLayout()
+        self.history_search_bar = QWidget()
+        self.history_search_bar.setLayout(history_controls)
         self.history_search_input = QLineEdit()
+        self.history_search_input.installEventFilter(self)
         self.history_search_input.setPlaceholderText("会話履歴を検索")
+        self.history_search_input.textChanged.connect(self._search_history)
         self.history_search_input.returnPressed.connect(self._search_history)
         history_controls.addWidget(self.history_search_input, 1)
         search_button = QPushButton("検索")
@@ -216,7 +227,8 @@ class ChatWidget(QWidget):
         clear_history_button = QPushButton("会話履歴を削除")
         clear_history_button.clicked.connect(self._clear_history)
         history_controls.addWidget(clear_history_button)
-        layout.addLayout(history_controls)
+        self.history_search_bar.hide()
+        layout.addWidget(self.history_search_bar)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; }")
@@ -238,10 +250,11 @@ class ChatWidget(QWidget):
         self.input.installEventFilter(self)
         layout.addWidget(self.input)
         self.prompt_suggestions = QListWidget()
+        self.prompt_suggestions.setParent(self)
+        self.prompt_suggestions.setWindowFlags(Qt.WindowType.ToolTip)
         self.prompt_suggestions.setMaximumHeight(120)
         self.prompt_suggestions.hide()
-        self.prompt_suggestions.itemActivated.connect(self._select_prompt_suggestion)
-        layout.addWidget(self.prompt_suggestions)
+        self.prompt_suggestions.itemClicked.connect(self._select_prompt_suggestion)
         self.input.textChanged.connect(self._update_prompt_suggestions)
         self.send_button = QPushButton("送信")
         self.send_button.clicked.connect(self.send)
@@ -316,9 +329,21 @@ class ChatWidget(QWidget):
             if sip.isdeleted(bubble):
                 continue
             bubble.setMaximumWidth(max_width)
+        self._position_prompt_suggestions()
 
     def eventFilter(self, watched, event):
-        if watched is self.input and event.type() == QEvent.Type.KeyPress:
+        input_widget = getattr(self, "input", None)
+        search_input = getattr(self, "history_search_input", None)
+        if watched is input_widget and event.type() == QEvent.Type.KeyPress:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
+                self._toggle_history_search()
+                return True
+            if event.key() == Qt.Key.Key_Up and self._cursor_is_at_start():
+                if self._navigate_prompt_history(1):
+                    return True
+            if event.key() == Qt.Key.Key_Down and self._prompt_history_index >= 0:
+                if self._navigate_prompt_history(-1):
+                    return True
             if self._prompt_suggestions_visible and event.key() == Qt.Key.Key_Up:
                 self.prompt_suggestions.setCurrentRow(max(0, self.prompt_suggestions.currentRow() - 1))
                 return True
@@ -327,12 +352,6 @@ class ChatWidget(QWidget):
                     min(self.prompt_suggestions.count() - 1, self.prompt_suggestions.currentRow() + 1)
                 )
                 return True
-            if event.key() == Qt.Key.Key_Up and self._cursor_is_at_start():
-                if self._navigate_prompt_history(-1):
-                    return True
-            if event.key() == Qt.Key.Key_Down and self._prompt_history_index >= 0:
-                if self._navigate_prompt_history(1):
-                    return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._prompt_suggestions_visible:
                 if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     self._select_prompt_suggestion(self.prompt_suggestions.currentItem())
@@ -341,7 +360,72 @@ class ChatWidget(QWidget):
                 if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     self.send()
                     return True
+        if watched is search_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self._hide_history_search()
+                return True
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._focus_next_search_match()
+                return True
         return super().eventFilter(watched, event)
+
+    def _toggle_history_search(self):
+        if self.history_search_bar.isVisible():
+            self._hide_history_search()
+            return
+        self.history_search_bar.show()
+        self.history_search_input.selectAll()
+        self.history_search_input.setFocus()
+
+    def _hide_history_search(self):
+        self.history_search_bar.hide()
+        self.history_search_input.clear()
+        self._clear_search_highlights()
+        self.input.setFocus()
+
+    def _clear_search_highlights(self):
+        for bubble in self._search_match_bubbles:
+            if not sip.isdeleted(bubble):
+                bubble.setStyleSheet(
+                    "background:#89b4fa; color:#1e1e2e; border-radius:12px; padding:10px 14px;"
+                    if self._bubble_texts.get(bubble, ("assistant",))[0] == "user"
+                    else "background:#313244; color:#cdd6f4; border-radius:12px; padding:10px 14px;"
+                )
+        self._search_match_bubbles = []
+        self._search_match_index = -1
+
+    def _search_history(self):
+        query = self.history_search_input.text().strip().casefold()
+        self._clear_search_highlights()
+        if not query:
+            return
+        self._search_match_bubbles = [
+            bubble for bubble, value in self._bubble_texts.items()
+            if query in value[1].casefold()
+        ]
+        if self._search_match_bubbles:
+            self._focus_next_search_match()
+
+    def _focus_next_search_match(self):
+        if not self._search_match_bubbles:
+            self._search_history()
+            return
+        self._search_match_index = (self._search_match_index + 1) % len(self._search_match_bubbles)
+        for bubble in self._search_match_bubbles:
+            if not sip.isdeleted(bubble):
+                role = self._bubble_texts.get(bubble, ("assistant", ""))[0]
+                color = "#f9e2af" if bubble is self._search_match_bubbles[self._search_match_index] else ("#89b4fa" if role == "user" else "#313244")
+                text_color = "#1e1e2e" if bubble is self._search_match_bubbles[self._search_match_index] or role == "user" else "#cdd6f4"
+                bubble.setStyleSheet(f"background:{color}; color:{text_color}; border-radius:12px; padding:10px 14px;")
+        target = self._search_match_bubbles[self._search_match_index]
+        self.scroll_area.ensureWidgetVisible(target.parentWidget())
+
+    def _position_prompt_suggestions(self):
+        if not self._prompt_suggestions_visible:
+            return
+        position = self.input.mapToGlobal(QPoint(0, self.input.height() + 2))
+        self.prompt_suggestions.setFixedWidth(self.input.width())
+        self.prompt_suggestions.move(position)
 
     def _cursor_is_at_start(self) -> bool:
         cursor = self.input.textCursor()
@@ -359,7 +443,7 @@ class ChatWidget(QWidget):
             self._prompt_history_draft = self.input.toPlainText()
             self._prompt_history_index = 0
         else:
-            if direction > 0 and self._prompt_history_index == len(self._prompt_history) - 1:
+            if direction < 0 and self._prompt_history_index == 0:
                 self.input.setPlainText(self._prompt_history_draft)
                 self._prompt_history_index = -1
                 return True
@@ -385,6 +469,7 @@ class ChatWidget(QWidget):
         self.prompt_suggestions.setVisible(bool(candidates))
         if candidates:
             self.prompt_suggestions.setCurrentRow(0)
+            self._position_prompt_suggestions()
 
     def _select_prompt_suggestion(self, item):
         if item is None:
@@ -510,6 +595,8 @@ class ChatWidget(QWidget):
                 self._add_bubble("assistant", command.get("reply", ""))
             elif command.get("action") == "chat_history_delete":
                 self._clear_history(confirm=True)
+            elif command.get("action") == "model_switch":
+                self._switch_model(command)
             else:
                 self._route_plugin_action(command)
         finally:
@@ -546,6 +633,7 @@ class ChatWidget(QWidget):
             # Google Calendar (GCalCtrl plugin)
             "confirm_create": self._confirm_create,
             "confirm_delete": self._confirm_delete,
+            "confirm_update": self._confirm_update,
             # YouTube Downloader
             "download_video": self._download_video,
             # GetNewTechInfo
@@ -557,6 +645,8 @@ class ChatWidget(QWidget):
             "add_tech_news_category": self._add_tech_news_category,
             "rename_tech_news_category": self._rename_tech_news_category,
             "delete_tech_news_category": self._delete_tech_news_category,
+            "mark_tech_news_read": self._mark_tech_news_read,
+            "bookmark_tech_news": self._bookmark_tech_news,
         }
         method = one_arg.get(method_name)
         if method:
@@ -661,7 +751,9 @@ class ChatWidget(QWidget):
                 e = self._format_datetime(end_info.get("dateTime"))
                 when = f"{s} ～ {e}" if e else s
             title = event.get("summary") or "（タイトルなし）"
-            lines.append(f"・{when}  {title}")
+            event_id = event.get("id", "")
+            id_hint = f" [id:{event_id}]" if event_id else ""
+            lines.append(f"・{when}  {title}{id_hint}")
             if event.get("location"):
                 lines.append(f"  場所: {event['location']}")
             if event.get("description"):
@@ -680,20 +772,6 @@ class ChatWidget(QWidget):
             lines.append(f"{role}: {message['content']}")
         lines.append(f"今回の依頼: {current_text}")
         return "\n".join(lines)
-
-    def _search_history(self):
-        query = self.history_search_input.text().strip()
-        if not query:
-            return
-        messages = self.history.search(query, 100)
-        if not messages:
-            self._add_bubble("assistant", f"「{query}」に一致する会話履歴はありません。", persist=False)
-            return
-        lines = [f"会話履歴の検索結果（{len(messages)}件）"]
-        for message in reversed(messages):
-            role = "ユーザー" if message["role"] == "user" else "アシスタント"
-            lines.append(f"[{role}] {message['content']}")
-        self._add_bubble("assistant", "\n".join(lines), persist=False)
 
     def _clear_history(self, confirm: bool = False):
         if confirm:
@@ -714,6 +792,9 @@ class ChatWidget(QWidget):
             if widget:
                 widget.deleteLater()
         self._all_bubbles.clear()
+        self._bubble_texts.clear()
+        self._search_match_bubbles.clear()
+        self._search_match_index = -1
         self._history_oldest_id = None
         self._history_exhausted = True
         self._add_bubble("assistant", "会話履歴を削除しました。", persist=False)
@@ -1320,6 +1401,96 @@ class ChatWidget(QWidget):
         else:
             self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
 
+    def _confirm_update(self, command: dict):
+        event_id = command.get("event_id", "")
+        if not event_id:
+            self._add_bubble("assistant", "event_idが指定されていません。先にagendaで予定を確認してください。")
+            return
+        changes = {k: v for k, v in {
+            "title": command.get("title"),
+            "start": command.get("start"),
+            "end": command.get("end"),
+            "description": command.get("description"),
+        }.items() if v is not None}
+        if not changes:
+            self._add_bubble("assistant", "変更する内容が指定されていません。")
+            return
+        lines = []
+        if "title" in changes:
+            lines.append(f"タイトル: {changes['title']}")
+        if "start" in changes:
+            lines.append(f"開始: {changes['start']}")
+        if "end" in changes:
+            lines.append(f"終了: {changes['end']}")
+        if "description" in changes:
+            lines.append(f"詳細: {changes['description']}")
+        answer = QMessageBox.question(
+            self, "予定を変更",
+            f"イベント {event_id} を次のように変更しますか？\n\n" + "\n".join(lines),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self._add_bubble("assistant", "変更をキャンセルしました。")
+            return
+        found = self.plugin_manager.find("update") if self.plugin_manager else None
+        if not found:
+            self._add_bubble("assistant", "Googleカレンダープラグインが見つかりません。")
+            return
+        plugin, _ = found
+        args = ["--event-id", event_id]
+        for flag, key in [("--title", "title"), ("--start", "start"), ("--end", "end"), ("--description", "description")]:
+            if key in changes:
+                args += [flag, str(changes[key])]
+        result = self.plugin_manager.execute_raw(plugin, ["update"], args)
+        if result.get("ok"):
+            self._add_bubble("assistant", "予定を変更しました。")
+        elif result.get("auth_required"):
+            self._add_auth_button()
+        else:
+            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
+
+    def _switch_model(self, command: dict):
+        model = command.get("model", "").strip()
+        if not model:
+            self._add_bubble("assistant", "モデル名が指定されていません。")
+            return
+        self.llm.model = model
+        self._add_bubble("assistant", f"モデルを {model} に切り替えました。モデルが未ダウンロードの場合は設定画面からダウンロードしてください。")
+
+    def _mark_tech_news_read(self, command: dict):
+        article_ids = command.get("article_ids", [])
+        if not article_ids:
+            self._add_bubble("assistant", "既読にする記事IDが指定されていません。")
+            return
+        found = self.plugin_manager.find("tech_news_mark_read") if self.plugin_manager else None
+        if not found:
+            self._add_bubble("assistant", "技術記事プラグインが見つかりません。")
+            return
+        plugin, _ = found
+        result = self.plugin_manager.execute_raw(plugin, ["mark-read"], [str(aid) for aid in article_ids])
+        if result.get("ok"):
+            self._add_bubble("assistant", f"{result.get('updated', len(article_ids))}件の記事を既読にしました。")
+        else:
+            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
+
+    def _bookmark_tech_news(self, command: dict):
+        article_ids = command.get("article_ids", [])
+        if not article_ids:
+            self._add_bubble("assistant", "ブックマークする記事IDが指定されていません。")
+            return
+        found = self.plugin_manager.find("tech_news_bookmark") if self.plugin_manager else None
+        if not found:
+            self._add_bubble("assistant", "技術記事プラグインが見つかりません。")
+            return
+        plugin, _ = found
+        subcommand = "unbookmark" if command.get("remove") else "bookmark"
+        result = self.plugin_manager.execute_raw(plugin, [subcommand], [str(aid) for aid in article_ids])
+        if result.get("ok"):
+            action_text = "解除" if command.get("remove") else "追加"
+            self._add_bubble("assistant", f"{result.get('updated', len(article_ids))}件のブックマークを{action_text}しました。")
+        else:
+            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
+
     def _add_auth_button(self):
         row = QWidget()
         row_layout = QHBoxLayout(row)
@@ -1385,6 +1556,7 @@ class ChatWidget(QWidget):
         else:
             self.message_layout.addWidget(row)
         self._all_bubbles.append(bubble)
+        self._bubble_texts[bubble] = (role, text)
         if persist:
             self.history.add(role, text)
             self.history.prune(self.history_retention)
@@ -1397,6 +1569,7 @@ class ChatWidget(QWidget):
             return
         if bubble in self._all_bubbles:
             self._all_bubbles.remove(bubble)
+        self._bubble_texts.pop(bubble, None)
         row = bubble.parentWidget()
         if row is not None:
             if self._pending_focus_widget is row:

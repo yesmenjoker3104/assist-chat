@@ -1,0 +1,99 @@
+{
+  "name": "GCalCtrl",
+  "version": "1.0.0",
+  "description": "Google Calendarの読み取り・予定管理",
+  "executable": "GCalCtrlCli.exe",
+  "env_vars": {
+    "GWS_COMMAND": "gws_command"
+  },
+  "actions": [
+    {
+      "action": "agenda",
+      "prompt_hint": "Googleカレンダー読み取り（予定確認・スケジュール確認・今日/来週/今月の予定は？・空き時間は？）",
+      "prompt_example": {
+        "action": "agenda",
+        "target_date": null,
+        "start_date": null,
+        "end_date": null,
+        "search_query": null
+      },
+      "prompt_notes": "期間指定ではtarget_dateをnullにしstart_dateとend_dateを設定。search_queryで予定名・説明・場所を検索。予定検索では関連語を複数設定（例:「バンド 練習 リハーサル スタジオ」）。期間指定例: 今日から3週間→start_date=今日・end_date=21日後、8月→start_date=8月1日・end_date=9月1日。今週・来週・次の月曜日なども具体的なYYYY-MM-DDへ変換。",
+      "command": {
+        "subcommands": ["agenda"],
+        "args": [
+          { "type": "flag", "flag": "--date",       "param": "target_date",  "omit_if_null": true },
+          { "type": "flag", "flag": "--start-date", "param": "start_date",   "omit_if_null": true },
+          { "type": "flag", "flag": "--end-date",   "param": "end_date",     "omit_if_null": true },
+          { "type": "flag", "flag": "--query",      "param": "search_query", "omit_if_null": true }
+        ]
+      },
+      "handler": "plugin",
+      "display": "events_table",
+      "display_field": "items"
+    },
+    {
+      "action": "create",
+      "prompt_hint": "Googleカレンダー予定追加（予定を作って・登録して・スケジュールして）",
+      "prompt_example": {
+        "action": "create",
+        "title": "予定名",
+        "start": "YYYY-MM-DDTHH:MM:SS+09:00",
+        "end": "YYYY-MM-DDTHH:MM:SS+09:00",
+        "description": "",
+        "all_day": false
+      },
+      "prompt_notes": "複数作成はeventsに配列で指定: {\"action\":\"create\",\"events\":[{...},{...}]}。終日予定はall_day:true。",
+      "command": { "subcommands": [], "args": [] },
+      "handler": "builtin:confirm_create",
+      "display": "text"
+    },
+    {
+      "action": "delete",
+      "prompt_hint": "Googleカレンダー予定削除（予定を消して・キャンセルして・削除して）",
+      "prompt_example": {
+        "action": "delete",
+        "event_id": "イベントID"
+      },
+      "prompt_notes": "event_idはagendaで取得したイベントのID（予定リストに表示される）。",
+      "command": { "subcommands": [], "args": [] },
+      "handler": "builtin:confirm_delete",
+      "display": "text"
+    },
+    {
+      "action": "update",
+      "prompt_hint": "Googleカレンダー予定変更（時間をずらして・タイトルを変えて・予定を修正して）",
+      "prompt_example": {
+        "action": "update",
+        "event_id": "イベントID",
+        "title": null,
+        "start": null,
+        "end": null,
+        "description": null
+      },
+      "prompt_notes": "変更したいフィールドだけ指定。event_idはagendaで取得したID（予定リストに表示される）。",
+      "command": { "subcommands": [], "args": [] },
+      "handler": "builtin:confirm_update",
+      "display": "text"
+    },
+    {
+      "action": "free_time",
+      "prompt_hint": "空き時間検索（来週空いてる時間は？・いつが空いてる？・この日の予定は空いてる？）",
+      "prompt_example": {
+        "action": "free_time",
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD"
+      },
+      "prompt_notes": "start_dateからend_dateまでの空き時間を検索。end_dateはstart_dateの翌日でもよい。",
+      "command": {
+        "subcommands": ["free-busy"],
+        "args": [
+          { "type": "flag", "flag": "--start-date", "param": "start_date" },
+          { "type": "flag", "flag": "--end-date",   "param": "end_date", "omit_if_null": true }
+        ]
+      },
+      "handler": "plugin",
+      "display": "text",
+      "display_template": "{summary}"
+    }
+  ]
+}
