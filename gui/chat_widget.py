@@ -7,7 +7,6 @@ from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -36,6 +35,52 @@ def _to_rich(text: str) -> str:
     escaped = html.escape(text)
     escaped = _URL_RE.sub(r'<a href="\1" style="color:#89dceb;">\1</a>', escaped)
     return escaped.replace("\n", "<br>")
+
+
+def _extract_urls(text: str, rich_text: str = "") -> list[str]:
+    urls: list[str] = []
+    urls.extend(re.findall(r"\[[^\]]+\]\((https?://[^\s)]+)\)", text))
+    urls.extend(item.rstrip(")]}.,!?") for item in re.findall(r"https?://\S+", text))
+    urls.extend(
+        html.unescape(item)
+        for item in re.findall(r'href=["\'](https?://[^"\']+)', rich_text, re.IGNORECASE)
+    )
+    return list(dict.fromkeys(urls))
+
+
+def _extract_output_dir(text: str) -> str | None:
+    match = re.search(
+        r"(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\r\n]+?)(?=に(?:ダウンロード|保存|取得)|\s+https?://|$)",
+        text,
+    )
+    if not match:
+        return None
+    return match.group(1).strip().rstrip("に。.,!?") or None
+
+
+def _is_audio_only_request(text: str) -> bool:
+    if re.search(r"動画(?:も|と音源)?(?:を)?(?:ほしい|ください|お願い|ダウンロード)", text) or "mp4" in text.lower():
+        return False
+    return any(kw in text for kw in ("音源", "音声", "音だけ", "mp3"))
+
+
+def _normalize_stems(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    allowed = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    return list(dict.fromkeys(str(item).lower() for item in value if str(item).lower() in allowed))
+
+
+def _extract_stems(text: str) -> list[str]:
+    stem_names = {
+        "ボーカル": "vocals", "ヴォーカル": "vocals", "歌": "vocals",
+        "ドラム": "drums", "ドラムス": "drums",
+        "ベース": "bass", "ギター": "guitar", "ピアノ": "piano",
+        "その他": "other",
+    }
+    stems = [stem for name, stem in stem_names.items() if name in text]
+    english_matches = re.findall(r"(?i)\b(vocals|drums|bass|guitar|piano|other)\b", text)
+    return _normalize_stems(stems + english_matches)
 
 
 # カレンダー等の固定アクションは各プラグインの plugin.json から動的挿入される
@@ -132,6 +177,134 @@ class TechNewsFetchThread(QThread):
             self.failed.emit(str(exc))
 
 
+class TechNewsSearchThread(QThread):
+    completed = pyqtSignal(list)
+    no_results = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, tech_news: TechNewsClient, command: dict):
+        super().__init__()
+        self.tech_news = tech_news
+        self.command = command
+
+    def _match_source(self, name: str) -> str | None:
+        lowered = name.lower()
+        for src in self.tech_news.list_sources().get("sources", []):
+            src_name = src.get("name", "")
+            if src_name.lower() == lowered:
+                return src_name
+        return None
+
+    def _match_category(self, query: str) -> dict | None:
+        if not query.strip():
+            return None
+        normalized = re.sub(r"[\s・、】【]", "", query).lower()
+        for cat in self.tech_news.list_categories().get("categories", []):
+            name = str(cat.get("name", ""))
+            norm_name = re.sub(r"[\s・、】【]", "", name).lower()
+            if norm_name and norm_name in normalized:
+                return cat
+        return None
+
+    def run(self):
+        try:
+            limit = max(1, min(100, int(self.command.get("limit") or 10)))
+            source = self.command.get("source") or None
+            sources = self.command.get("sources")
+            query_str = str(self.command.get("query", ""))
+            unread = bool(self.command.get("unread", False))
+
+            category = self._match_category(query_str)
+            if not category and source:
+                category = self._match_category(str(source))
+            if not category and isinstance(sources, list):
+                for s in sources:
+                    category = self._match_category(str(s))
+                    if category:
+                        break
+
+            if category:
+                articles = []
+                for cat_source in category.get("sources", []):
+                    if cat_source.get("enabled"):
+                        result = self.tech_news.search("", cat_source["name"], unread, limit)
+                        articles.extend(result.get("articles", []))
+                if not articles:
+                    self.no_results.emit(f"カテゴリ「{category['name']}」に該当する技術記事はありません。")
+                    return
+                self.completed.emit(articles)
+                return
+
+            if isinstance(sources, list) and sources:
+                articles = []
+                for req_src in dict.fromkeys(str(s).strip() for s in sources if str(s).strip()):
+                    matched = self._match_source(req_src)
+                    if matched:
+                        result = self.tech_news.search("", matched, unread, limit)
+                        articles.extend(result.get("articles", []))
+                if not articles:
+                    self.no_results.emit("指定されたソースに該当する技術記事はありません。")
+                    return
+                self.completed.emit(articles)
+                return
+
+            result = self.tech_news.search(query_str, source, unread, limit)
+            articles = result.get("articles", [])
+            if not articles and not source and query_str.strip():
+                matched = self._match_source(query_str.strip())
+                if matched:
+                    result = self.tech_news.search("", matched, unread, limit)
+                    articles = result.get("articles", [])
+            if not articles:
+                hint = f"（source={source!r}, query={query_str!r}, limit={limit}）"
+                self.no_results.emit(f"該当する技術記事はありません。{hint}")
+                return
+            self.completed.emit(articles)
+        except TechNewsError as exc:
+            self.failed.emit(str(exc))
+
+
+class RoutingThread(QThread):
+    """送信テキストをバックグラウンドで解析し、適切なルートへシグナルを発火する。
+    メインスレッドへのブロッキングI/Oを防ぐため、軽い入力判定だけをここで行う。"""
+
+    route_llm = pyqtSignal(str)
+    route_download = pyqtSignal(dict)
+    route_history_clear = pyqtSignal()
+
+    def __init__(self, text: str, rich_text: str, prompt: str):
+        super().__init__()
+        self.text = text
+        self.rich_text = rich_text
+        self.prompt = prompt
+
+    def run(self):
+        text = self.text
+        rich_text = self.rich_text
+
+        if re.search(r"(?:会話|チャット).*(?:履歴|ログ).*(?:削除|消去|クリア)", text):
+            self.route_history_clear.emit()
+            return
+
+        direct_urls = _extract_urls(text, rich_text)
+        direct_video_urls = [
+            url for url in direct_urls
+            if re.match(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/", url, re.IGNORECASE)
+        ]
+        if direct_video_urls:
+            playlist = any("/playlist" in url or "list=" in url for url in direct_video_urls)
+            self.route_download.emit({
+                "urls": direct_video_urls,
+                "audio_only": _is_audio_only_request(text),
+                "output_dir": _extract_output_dir(text),
+                "stems": _extract_stems(text),
+                "playlist": playlist,
+            })
+            return
+
+        self.route_llm.emit(self.prompt)
+
+
 class HistoryLoadThread(QThread):
     completed = pyqtSignal(list)
 
@@ -166,6 +339,7 @@ class ChatWidget(QWidget):
         self.history_retention = min(
             int(settings.get("chat_history_retention", 5000)), int(limits["max_retention"])
         )
+        self._history_writes_since_prune = 0
         self.history_llm_turns = min(
             int(settings.get("chat_history_llm_turns", 10)), int(limits["max_llm_turns"])
         )
@@ -181,6 +355,7 @@ class ChatWidget(QWidget):
         self._prompt_suggestions_visible = False
         self._bubble_texts = {}
         self._search_match_bubbles = []
+        self._search_matches = []
         self._search_match_index = -1
         self.thread = None
         self.display_thread = None
@@ -191,13 +366,17 @@ class ChatWidget(QWidget):
         self.last_user_text = ""
         self._pending_focus_widget = None
         self._focus_scheduled = False
+        self._focus_generation = 0
         self._streaming_response = ""
+        self._is_streaming = False
         self.thinking_frame = 0
         self.thinking_timer = QTimer(self)
         self.thinking_timer.setInterval(350)
         self.thinking_timer.timeout.connect(self._animate_thinking)
         self._all_bubbles: list[QLabel] = []
+        self.routing_thread = None
         self.tech_news_fetch_thread = None
+        self.tech_news_search_thread = None
         self.tech_news_timer = QTimer(self)
         interval_minutes = max(1, int(tech_news_auto_fetch_minutes))
         self.tech_news_timer.setInterval(interval_minutes * 60 * 1000)
@@ -224,6 +403,14 @@ class ChatWidget(QWidget):
         search_button = QPushButton("検索")
         search_button.clicked.connect(self._search_history)
         history_controls.addWidget(search_button)
+        previous_match_button = QPushButton("↑")
+        previous_match_button.setToolTip("前の一致箇所")
+        previous_match_button.clicked.connect(lambda: self._focus_search_match(-1))
+        history_controls.addWidget(previous_match_button)
+        next_match_button = QPushButton("↓")
+        next_match_button.setToolTip("次の一致箇所")
+        next_match_button.clicked.connect(lambda: self._focus_search_match(1))
+        history_controls.addWidget(next_match_button)
         clear_history_button = QPushButton("会話履歴を削除")
         clear_history_button.clicked.connect(self._clear_history)
         history_controls.addWidget(clear_history_button)
@@ -268,7 +455,10 @@ class ChatWidget(QWidget):
 
     def _restore_initial_history(self):
         for message in self.history.latest(self.history_initial_messages):
-            self._add_bubble(message["role"], message["content"], persist=False, focus=False)
+            self._add_bubble(
+                message["role"], message["content"],
+                is_html=bool(message.get("is_html")), persist=False, focus=False,
+            )
             self._history_oldest_id = message["id"]
         if self.history_initial_messages == 0:
             self._history_exhausted = True
@@ -284,7 +474,7 @@ class ChatWidget(QWidget):
         self._history_previous_scroll_max = scroll_bar.maximum()
         self._history_previous_scroll_value = scroll_bar.value()
         self.history_load_thread = HistoryLoadThread(
-            self.history, self._history_oldest_id, self.history_initial_messages or 200
+            self.history, self._history_oldest_id, self.history_initial_messages
         )
         self.history_load_thread.completed.connect(self._on_older_history_loaded)
         self.history_load_thread.start()
@@ -292,7 +482,9 @@ class ChatWidget(QWidget):
     def _on_older_history_loaded(self, messages: list):
         for message in reversed(messages):
             self._add_bubble(
-                message["role"], message["content"], persist=False, at_top=True, focus=False
+                message["role"], message["content"],
+                is_html=bool(message.get("is_html")),
+                persist=False, at_top=True, focus=False,
             )
         if messages:
             self._history_oldest_id = messages[0]["id"]
@@ -329,7 +521,15 @@ class ChatWidget(QWidget):
             if sip.isdeleted(bubble):
                 continue
             bubble.setMaximumWidth(max_width)
+            if not self._bubble_texts.get(bubble, ("assistant", "", False))[2]:
+                content = self._bubble_texts[bubble][1]
+                if "\n" not in content:
+                    bubble.setMinimumWidth(min(max_width, self._bubble_content_width(bubble, content)))
         self._position_prompt_suggestions()
+
+    @staticmethod
+    def _bubble_content_width(bubble: QLabel, text: str) -> int:
+        return bubble.fontMetrics().horizontalAdvance(text) + 40
 
     def eventFilter(self, watched, event):
         input_widget = getattr(self, "input", None)
@@ -367,6 +567,12 @@ class ChatWidget(QWidget):
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._focus_next_search_match()
                 return True
+            if event.key() == Qt.Key.Key_Up:
+                self._focus_search_match(-1)
+                return True
+            if event.key() == Qt.Key.Key_Down:
+                self._focus_search_match(1)
+                return True
         return super().eventFilter(watched, event)
 
     def _toggle_history_search(self):
@@ -386,12 +592,15 @@ class ChatWidget(QWidget):
     def _clear_search_highlights(self):
         for bubble in self._search_match_bubbles:
             if not sip.isdeleted(bubble):
+                role, text, is_html = self._bubble_texts.get(bubble, ("assistant", "", False))
+                bubble.setText(text if is_html else _to_rich(text))
                 bubble.setStyleSheet(
                     "background:#89b4fa; color:#1e1e2e; border-radius:12px; padding:10px 14px;"
                     if self._bubble_texts.get(bubble, ("assistant",))[0] == "user"
                     else "background:#313244; color:#cdd6f4; border-radius:12px; padding:10px 14px;"
                 )
         self._search_match_bubbles = []
+        self._search_matches = []
         self._search_match_index = -1
 
     def _search_history(self):
@@ -403,22 +612,57 @@ class ChatWidget(QWidget):
             bubble for bubble, value in self._bubble_texts.items()
             if query in value[1].casefold()
         ]
-        if self._search_match_bubbles:
-            self._focus_next_search_match()
+        self._search_matches = []
+        for bubble in self._search_match_bubbles:
+            text = self._bubble_texts[bubble][1]
+            self._search_matches.extend(
+                (bubble, occurrence)
+                for occurrence, _ in enumerate(
+                    re.finditer(re.escape(query), text, re.IGNORECASE)
+                )
+            )
+        if self._search_matches:
+            self._render_search_highlights()
+            self._focus_search_match(1)
 
     def _focus_next_search_match(self):
-        if not self._search_match_bubbles:
+        self._focus_search_match(1)
+
+    def _focus_search_match(self, step: int):
+        if not self._search_matches:
             self._search_history()
             return
-        self._search_match_index = (self._search_match_index + 1) % len(self._search_match_bubbles)
+        self._search_match_index = (self._search_match_index + step) % len(self._search_matches)
+        self._render_search_highlights()
+        target = self._search_matches[self._search_match_index][0]
+        self.scroll_area.ensureWidgetVisible(target.parentWidget())
+
+    def _render_search_highlights(self):
+        query = self.history_search_input.text().strip()
+        if not query:
+            return
+        active = self._search_matches[self._search_match_index] if self._search_match_index >= 0 else None
         for bubble in self._search_match_bubbles:
             if not sip.isdeleted(bubble):
-                role = self._bubble_texts.get(bubble, ("assistant", ""))[0]
-                color = "#f9e2af" if bubble is self._search_match_bubbles[self._search_match_index] else ("#89b4fa" if role == "user" else "#313244")
-                text_color = "#1e1e2e" if bubble is self._search_match_bubbles[self._search_match_index] or role == "user" else "#cdd6f4"
-                bubble.setStyleSheet(f"background:{color}; color:{text_color}; border-radius:12px; padding:10px 14px;")
-        target = self._search_match_bubbles[self._search_match_index]
-        self.scroll_area.ensureWidgetVisible(target.parentWidget())
+                role, text, is_html = self._bubble_texts.get(bubble, ("assistant", "", False))
+                if is_html:
+                    rendered = html.escape(text)
+                else:
+                    rendered = html.escape(text)
+                pattern = re.compile(re.escape(query), re.IGNORECASE)
+                occurrence = 0
+
+                def replace(match):
+                    nonlocal occurrence
+                    current = (bubble, occurrence)
+                    active_style = "background:#fab387; color:#1e1e2e;"
+                    other_style = "background:#f9e2af; color:#1e1e2e;"
+                    style = active_style if active == current else other_style
+                    replacement = f'<span style="{style} border-radius:3px;">{match.group(0)}</span>'
+                    occurrence += 1
+                    return replacement
+
+                bubble.setText(pattern.sub(replace, rendered))
 
     def _position_prompt_suggestions(self):
         if not self._prompt_suggestions_visible:
@@ -429,7 +673,12 @@ class ChatWidget(QWidget):
 
     def _cursor_is_at_start(self) -> bool:
         cursor = self.input.textCursor()
-        return not cursor.hasSelection() and cursor.position() == 0
+        if cursor.hasSelection():
+            return False
+        text = self.input.toPlainText()
+        if "\n" not in text and "\r" not in text:
+            return True
+        return cursor.position() == 0
 
     def _load_prompt_history(self):
         self._prompt_history = self.history.recent_prompts(self.history_retention)
@@ -486,35 +735,20 @@ class ChatWidget(QWidget):
         if not text or self.thread and self.thread.isRunning():
             return
         self.input.clear()
+        self._pending_focus_widget = None
+        self._focus_scheduled = False
+        self._focus_generation += 1
         self._prompt_history_index = -1
         self._prompt_history_draft = ""
         self.prompt_suggestions.hide()
         self._prompt_suggestions_visible = False
         self.last_user_text = text
-        self._add_bubble("user", text)
+        self._add_bubble("user", text, is_html=False, focus=False)
+        QTimer.singleShot(100, self._scroll_to_bottom)
         self._prompt_history = [text] + [prompt for prompt in self._prompt_history if prompt != text]
-        if re.search(r"(?:会話|チャット).*(?:履歴|ログ).*(?:削除|消去|クリア)", text):
-            self._clear_history(confirm=True)
-            return
-        direct_urls = self._extract_urls(text, rich_text)
-        direct_video_urls = [
-            url for url in direct_urls
-            if re.match(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/", url, re.IGNORECASE)
-        ]
-        if direct_video_urls:
-            playlist = any("/playlist" in url or "list=" in url for url in direct_video_urls)
-            self._download_video({
-                "urls": direct_video_urls,
-                "audio_only": self._is_audio_only_request(text),
-                "output_dir": self._extract_output_dir(text),
-                "stems": self._extract_stems(text),
-                "playlist": playlist,
-            })
-            return
-        source_command = self._extract_tech_news_source_add(text, rich_text)
-        if source_command:
-            self._add_tech_news_source(source_command)
-            return
+        QTimer.singleShot(0, lambda: self._continue_send(text, rich_text))
+
+    def _continue_send(self, text: str, rich_text: str):
         plugin_actions = (
             "\n".join(self.plugin_manager.build_prompt_lines())
             if self.plugin_manager else ""
@@ -522,11 +756,20 @@ class ChatWidget(QWidget):
         prompt = SYSTEM_PROMPT_TEMPLATE.format(
             plugin_actions=plugin_actions,
             now=datetime.now().astimezone().isoformat(),
-        )
-        prompt += self._history_prompt(text)
+        ) + self._history_prompt(text)
+        self.routing_thread = RoutingThread(text, rich_text, prompt)
+        self.routing_thread.route_llm.connect(self._on_route_llm)
+        self.routing_thread.route_download.connect(self._download_video)
+        self.routing_thread.route_history_clear.connect(lambda: self._clear_history(confirm=True))
+        self.routing_thread.start()
+
+    def _on_route_llm(self, prompt: str):
+        self.routing_thread = None
         self.send_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False)
+        self._is_streaming = True
+        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False, focus=False)
+        self.thinking_bubble.setMinimumWidth(min(self._bubble_max_width(), 320))
         self.thinking_frame = 0
         self.thinking_timer.start()
         self.thread = LlmThread(self.llm, prompt)
@@ -537,7 +780,7 @@ class ChatWidget(QWidget):
 
     def cancel_current_operation(self):
         cancelled = False
-        for thread in (self.thread, self.display_thread, self.download_thread):
+        for thread in (self.routing_thread, self.thread, self.display_thread, self.download_thread, self.tech_news_search_thread):
             if thread and thread.isRunning():
                 thread.requestInterruption()
                 cancelled = True
@@ -545,6 +788,7 @@ class ChatWidget(QWidget):
             self.cancel_button.setEnabled(False)
 
     def _on_llm_cancelled(self):
+        self._is_streaming = False
         self.thinking_timer.stop()
         self._remove_bubble(self.thinking_bubble)
         self.thinking_bubble = None
@@ -564,9 +808,6 @@ class ChatWidget(QWidget):
         # JSONコマンド（{}括弧内）は表示を抑制。JSON後のプレーンテキストのみ表示
         display_text = self._extract_displayable_text(self._streaming_response)
         self.thinking_bubble.setText(_to_rich(display_text) if display_text else "・")
-        row = self.thinking_bubble.parentWidget()
-        if row is not None:
-            self._request_focus(row)
 
     def _extract_displayable_text(self, response: str) -> str:
         response = response.strip()
@@ -582,6 +823,7 @@ class ChatWidget(QWidget):
         return response
 
     def handle_response(self, response: str):
+        self._is_streaming = False
         self.thinking_timer.stop()
         self._remove_bubble(self.thinking_bubble)
         self.thinking_bubble = None
@@ -811,16 +1053,21 @@ class ChatWidget(QWidget):
             f"データ:\n{json.dumps(data, ensure_ascii=False, indent=2)}"
         )
         self._display_pending = True
-        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False)
+        self._streaming_response = ""
+        self._is_streaming = True
+        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False, focus=False)
+        self.thinking_bubble.setMinimumWidth(min(self._bubble_max_width(), 320))
         self.thinking_frame = 0
         self.thinking_timer.start()
         self.display_thread = LlmThread(self.llm, fmt_prompt)
+        self.display_thread.chunk_received.connect(self._on_llm_chunk)
         self.display_thread.completed.connect(self._on_format_completed)
         self.display_thread.cancelled.connect(self._on_llm_cancelled)
         self.cancel_button.setEnabled(True)
         self.display_thread.start()
 
     def _on_format_completed(self, response: str):
+        self._is_streaming = False
         self.thinking_timer.stop()
         if self.thinking_bubble:
             self._remove_bubble(self.thinking_bubble)
@@ -862,52 +1109,45 @@ class ChatWidget(QWidget):
         if not self.tech_news:
             self._add_bubble("assistant", "技術記事CLIの設定が未完了です。")
             return
-        try:
-            limit = max(1, min(100, int(command.get("limit") or 10)))
-            source = command.get("source") or None
-            sources = command.get("sources")
-            query_str = str(command.get("query", ""))
-            unread = bool(command.get("unread", False))
-            if isinstance(sources, list):
-                articles = []
-                for requested_source in dict.fromkeys(str(item).strip() for item in sources if str(item).strip()):
-                    matched_source = self._match_registered_source(requested_source)
-                    if matched_source:
-                        result = self.tech_news.search("", matched_source, unread, limit)
-                        articles.extend(result.get("articles", []))
-                if not articles:
-                    self._add_bubble("assistant", "指定されたソースに該当する技術記事はありません。")
-                    return
-                self._render_articles_table(articles)
-                return
-            category = self._match_registered_category(query_str) if not source else None
-            if category:
-                articles = []
-                for category_source in category.get("sources", []):
-                    if category_source.get("enabled"):
-                        result = self.tech_news.search("", category_source["name"], unread, limit)
-                        articles.extend(result.get("articles", []))
-                if not articles:
-                    self._add_bubble("assistant", f"カテゴリ「{category['name']}」に該当する技術記事はありません。")
-                    return
-                self._render_articles_table(articles)
-                return
-            result = self.tech_news.search(query_str, source, unread, limit)
-            articles = result.get("articles", [])
-            if not articles and not source and query_str.strip():
-                # LLMがソース名をqueryへ入れてしまうケースの救済（例:「TECH PLAYの記事」）
-                matched_source = self._match_registered_source(query_str.strip())
-                if matched_source:
-                    source, query_str = matched_source, ""
-                    result = self.tech_news.search(query_str, source, unread, limit)
-                    articles = result.get("articles", [])
-            if not articles:
-                hint = f"（source={source!r}, query={query_str!r}, limit={limit}）"
-                self._add_bubble("assistant", f"該当する技術記事はありません。{hint}")
-                return
-            self._render_articles_table(articles)
-        except TechNewsError as exc:
-            self._add_bubble("assistant", f"エラー: {exc}")
+        thinking = self._add_bubble("assistant", "検索中...", persist=False, focus=False)
+        self._display_pending = True
+        self.send_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.tech_news_search_thread = TechNewsSearchThread(self.tech_news, command)
+        self.tech_news_search_thread.completed.connect(
+            lambda articles: self._on_tech_news_search_done(articles, thinking)
+        )
+        self.tech_news_search_thread.no_results.connect(
+            lambda msg: self._on_tech_news_search_no_results(msg, thinking)
+        )
+        self.tech_news_search_thread.failed.connect(
+            lambda err: self._on_tech_news_search_failed(err, thinking)
+        )
+        self.tech_news_search_thread.start()
+
+    def _on_tech_news_search_done(self, articles: list, thinking: QLabel):
+        self._remove_bubble(thinking)
+        self._render_articles_table(articles)
+        self.tech_news_search_thread = None
+        self._display_pending = False
+        self.send_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+
+    def _on_tech_news_search_no_results(self, msg: str, thinking: QLabel):
+        self._remove_bubble(thinking)
+        self._add_bubble("assistant", msg)
+        self.tech_news_search_thread = None
+        self._display_pending = False
+        self.send_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+
+    def _on_tech_news_search_failed(self, err: str, thinking: QLabel):
+        self._remove_bubble(thinking)
+        self._add_bubble("assistant", f"エラー: {err}")
+        self.tech_news_search_thread = None
+        self._display_pending = False
+        self.send_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
 
     def _match_registered_source(self, name: str) -> str | None:
         try:
@@ -1175,7 +1415,7 @@ class ChatWidget(QWidget):
         allow_playlist = bool(command.get("playlist", False)) or any(
             "/playlist" in url or "list=" in url for url in urls
         )
-        stems = self._normalize_stems(command.get("stems"))
+        stems = _normalize_stems(command.get("stems"))
         mode_label = "音源のみ" if audio_only else "動画+音源"
         if stems:
             mode_label += f" / 音源分離: {', '.join(stems)}"
@@ -1236,80 +1476,6 @@ class ChatWidget(QWidget):
         self.download_thread = None
         self.send_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
-
-    @staticmethod
-    def _extract_urls(text: str, rich_text: str = "") -> list[str]:
-        urls: list[str] = []
-
-        # Support markdown-style links: [title](https://example.com)
-        markdown_matches = re.findall(r"\[[^\]]+\]\((https?://[^\s)]+)\)", text)
-        urls.extend(markdown_matches)
-
-        # Also support raw URLs pasted directly in text.
-        raw_matches = re.findall(r"https?://\S+", text)
-        urls.extend(item.rstrip(")]}.,!?") for item in raw_matches)
-
-        # Rich-text paste can keep the href out of toPlainText().
-        href_matches = re.findall(r'href=["\'](https?://[^"\']+)', rich_text, re.IGNORECASE)
-        urls.extend(html.unescape(item) for item in href_matches)
-
-        return list(dict.fromkeys(urls))
-
-    @classmethod
-    def _extract_tech_news_source_add(cls, text: str, rich_text: str = "") -> dict | None:
-        """ラベル付きのRSSソース追加依頼をLLMを介さずに解釈する。"""
-        category_match = re.search(r"(?m)^\s*(?:カテゴリ|カテゴリー)\s*[、,:：]*\s*([^\r\n]+)", text)
-        name_match = re.search(r"(?m)^\s*ソース名\s*[、,:：]*\s*([^\r\n]+)", text)
-        urls = cls._extract_urls(text, rich_text)
-        if not name_match or not urls:
-            return None
-        category = category_match.group(1).strip().rstrip("。") if category_match else None
-        name = name_match.group(1).strip().rstrip("。")
-        return {
-            "action": "tech_news_sources_add",
-            "name": name,
-            "url": urls[0],
-            "category": category or None,
-        }
-
-    @staticmethod
-    def _extract_output_dir(text: str) -> str | None:
-        match = re.search(
-            r"(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\r\n]+?)(?=に(?:ダウンロード|保存|取得)|\s+https?://|$)",
-            text,
-        )
-        if not match:
-            return None
-        candidate = match.group(1).strip().rstrip("に。.,!?")
-        return candidate or None
-
-    @staticmethod
-    def _is_audio_only_request(text: str) -> bool:
-        lowered = text.lower()
-        explicit_video = re.search(r"動画(?:も|と音源)?(?:を)?(?:ほしい|ください|お願い|ダウンロード)", text)
-        if explicit_video or "mp4" in lowered:
-            return False
-        audio_only_keywords = ("音源", "音声", "音だけ", "mp3")
-        return any(keyword in text for keyword in audio_only_keywords)
-
-    @staticmethod
-    def _normalize_stems(value) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        allowed = {"vocals", "drums", "bass", "guitar", "piano", "other"}
-        return list(dict.fromkeys(str(item).lower() for item in value if str(item).lower() in allowed))
-
-    @classmethod
-    def _extract_stems(cls, text: str) -> list[str]:
-        stem_names = {
-            "ボーカル": "vocals", "ヴォーカル": "vocals", "歌": "vocals",
-            "ドラム": "drums", "ドラムス": "drums",
-            "ベース": "bass", "ギター": "guitar", "ピアノ": "piano",
-            "その他": "other",
-        }
-        stems = [stem for name, stem in stem_names.items() if name in text]
-        english_matches = re.findall(r"(?i)\b(vocals|drums|bass|guitar|piano|other)\b", text)
-        return cls._normalize_stems(stems + english_matches)
 
     @staticmethod
     def _is_download_request(text: str) -> bool:
@@ -1571,7 +1737,10 @@ class ChatWidget(QWidget):
             | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         bubble.setText(text if is_html else _to_rich(text))
-        bubble.setMaximumWidth(self._bubble_max_width())
+        max_width = self._bubble_max_width()
+        bubble.setMaximumWidth(max_width)
+        if not is_html and "\n" not in text:
+            bubble.setMinimumWidth(min(max_width, self._bubble_content_width(bubble, text)))
         bubble.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         if role == "user":
             bubble.setStyleSheet("background:#89b4fa; color:#1e1e2e; border-radius:12px; padding:10px 14px;")
@@ -1586,13 +1755,19 @@ class ChatWidget(QWidget):
         else:
             self.message_layout.addWidget(row)
         self._all_bubbles.append(bubble)
-        self._bubble_texts[bubble] = (role, text)
+        self._bubble_texts[bubble] = (role, text, is_html)
         if persist:
-            self.history.add(role, text)
-            self.history.prune(self.history_retention)
+            QTimer.singleShot(0, lambda: self._persist_bubble(role, text, is_html))
         if focus:
             self._request_focus(row)
         return bubble
+
+    def _persist_bubble(self, role: str, text: str, is_html: bool = False) -> None:
+        self.history.add(role, text, is_html=is_html)
+        self._history_writes_since_prune += 1
+        if self._history_writes_since_prune >= 100:
+            self.history.prune(self.history_retention)
+            self._history_writes_since_prune = 0
 
     def _remove_bubble(self, bubble: QLabel | None):
         if bubble is None:
@@ -1632,14 +1807,17 @@ class ChatWidget(QWidget):
             return
 
     def _request_focus(self, widget: QWidget):
+        self._pending_focus_widget = widget
         if self._focus_scheduled:
             return
-        self._pending_focus_widget = widget
         self._focus_scheduled = True
+        generation = self._focus_generation
         # 100ms 待ってレイアウト確定後にスクロール
-        QTimer.singleShot(100, self._focus_pending_widget)
+        QTimer.singleShot(100, lambda: self._focus_pending_widget(generation))
 
-    def _focus_pending_widget(self):
+    def _focus_pending_widget(self, generation: int):
+        if generation != self._focus_generation:
+            return
         widget = self._pending_focus_widget
         self._pending_focus_widget = None
         self._focus_scheduled = False

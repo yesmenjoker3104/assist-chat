@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
     def apply_settings(self, settings: dict):
         self.llm.base_url = settings["ollama_url"].rstrip("/")
         self.llm.model = settings["model"]
+        self._set_ollama_status("接続済み")
         self.plugin_manager.settings = settings
         self.downloader.output_dir = (
             Path(settings["youtube_download_output_dir"])
@@ -194,10 +195,10 @@ class MainWindow(QMainWindow):
             # 前回終了時の孤立プロセスなど、既存起動分も終了対象として追跡する
             self.ollama_pid = self._find_running_ollama_pid()
             atexit.register(self.stop_ollama)
-            return "Ollama接続済み"
+            return self._ollama_status_text("接続済み")
         executable = str(OLLAMA_EXE) if OLLAMA_EXE.exists() else None
         if not executable:
-            return "プロジェクト内のollama\\ollama.exeが見つかりません。"
+            return self._ollama_status_text("実行ファイルが見つかりません")
         self.ollama_process = subprocess.Popen(
             [executable, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -208,10 +209,16 @@ class MainWindow(QMainWindow):
         for _ in range(30):
             if self.llm.health_check():
                 if not self.llm.has_model():
-                    return f"Ollama接続済み。ただし {self.llm.model} がありません。"
-                return "Ollama接続済み"
+                    return self._ollama_status_text(f"接続済み・モデルなし")
+                return self._ollama_status_text("接続済み")
             time.sleep(1)
-        return "Ollamaの起動を待機中です。しばらくお待ちください。起動しない場合は setup.ps1 を実行してください。"
+        return self._ollama_status_text("起動待機中")
+
+    def _ollama_status_text(self, state: str) -> str:
+        return f"Ollama: {state} / モデル: {self.llm.model}"
+
+    def _set_ollama_status(self, state: str) -> None:
+        self.status.setText(self._ollama_status_text(state))
 
     def _find_running_ollama_pid(self) -> int | None:
         """プロジェクト同梱のollama.exeに限定してPIDを検索する（システム版は対象外）。"""

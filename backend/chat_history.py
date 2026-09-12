@@ -28,24 +28,40 @@ class ChatHistory:
                     )
                     """
                 )
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+                }
+                if "is_html" not in columns:
+                    connection.execute(
+                        "ALTER TABLE messages ADD COLUMN is_html INTEGER NOT NULL DEFAULT 0"
+                    )
+                    connection.execute(
+                        """
+                        UPDATE messages
+                        SET is_html = 1
+                        WHERE content LIKE '<b>技術記事%'
+                           OR content LIKE '<table%'
+                        """
+                    )
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id)"
                 )
 
-    def add(self, role: str, content: str) -> None:
+    def add(self, role: str, content: str, is_html: bool = False) -> None:
         if not content:
             return
         with closing(self._connect()) as connection:
             connection.execute(
-                "INSERT INTO messages (role, content, created_at) VALUES (?, ?, ?)",
-                (role, content, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO messages (role, content, created_at, is_html) VALUES (?, ?, ?, ?)",
+                (role, content, datetime.now(timezone.utc).isoformat(), int(is_html)),
             )
             connection.commit()
 
     def latest(self, limit: int) -> list[dict]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT id, role, content, created_at FROM messages ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, content, created_at, is_html FROM messages ORDER BY id DESC LIMIT ?",
                 (max(0, limit),),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
@@ -54,7 +70,7 @@ class ChatHistory:
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, is_html
                 FROM messages
                 WHERE id < ?
                 ORDER BY id DESC
@@ -68,7 +84,7 @@ class ChatHistory:
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, is_html
                 FROM messages
                 WHERE content LIKE ?
                 ORDER BY id DESC
