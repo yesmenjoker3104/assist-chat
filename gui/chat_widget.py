@@ -647,6 +647,8 @@ class ChatWidget(QWidget):
             "delete_tech_news_category": self._delete_tech_news_category,
             "mark_tech_news_read": self._mark_tech_news_read,
             "bookmark_tech_news": self._bookmark_tech_news,
+            # Gmail (GmailCtrl plugin)
+            "confirm_draft_create": self._confirm_draft_create,
         }
         method = one_arg.get(method_name)
         if method:
@@ -1517,6 +1519,34 @@ class ChatWidget(QWidget):
             self._add_bubble("assistant", "ブラウザでGoogleアカウントにログインしてください。完了後、再度お試しください。")
         else:
             self._add_bubble("assistant", f"認証の起動に失敗しました: {result.get('error', '')}")
+
+    def _confirm_draft_create(self, command: dict):
+        to = command.get("to", "")
+        subject = command.get("subject", "")
+        body = command.get("body", "")
+        preview = body[:200] + ("..." if len(body) > 200 else "")
+        answer = QMessageBox.question(
+            self, "メール下書き作成",
+            f"宛先: {to}\n件名: {subject}\n\n{preview}\n\n下書きを作成しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self._add_bubble("assistant", "下書き作成をキャンセルしました。")
+            return
+        found = self.plugin_manager.find("gmail_draft_create") if self.plugin_manager else None
+        if not found:
+            self._add_bubble("assistant", "Gmailプラグインが見つかりません。")
+            return
+        plugin, _ = found
+        result = self.plugin_manager.execute_raw(
+            plugin, ["draft-create"], ["--to", to, "--subject", subject, "--body", body]
+        )
+        if result.get("ok"):
+            self._add_bubble("assistant", result.get("message", "下書きを作成しました。"))
+        elif result.get("auth_required"):
+            self._add_auth_button()
+        else:
+            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
 
     def _add_bubble(
         self,

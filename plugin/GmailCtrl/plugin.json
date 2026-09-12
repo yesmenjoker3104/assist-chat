@@ -1,0 +1,36 @@
+{
+  "name": "GmailCtrl",
+  "version": "1.0.0",
+  "description": "Gmailのメール確認・下書き作成",
+  "executable": "GMailCtrlCli.exe",
+  "env_vars": { "GWS_COMMAND": "gws_command" },
+  "actions": [
+    {
+      "action": "gmail_list",
+      "prompt_hint": "メール確認（未読メールを見せて・メールが来てる？・受信トレイを確認して）",
+      "prompt_example": { "action": "gmail_list", "unread": true, "query": null, "limit": 20 },
+      "prompt_notes": "queryにGmail検索クエリを指定可（例: from:example@gmail.com）。limitは1〜50。",
+      "command": {
+        "subcommands": ["list"],
+        "args": [
+          { "type": "bool_flag", "flag": "--unread", "param": "unread" },
+          { "type": "flag", "flag": "--query", "param": "query", "omit_if_null": true },
+          { "type": "flag", "flag": "--limit", "param": "limit", "default": 20, "min": 1, "max": 50 }
+        ]
+      },
+      "handler": "plugin",
+      "display": "table",
+      "display_field": "messages",
+      "display_columns": ["date", "from", "subject"]
+    },
+    {
+      "action": "gmail_draft_create",
+      "prompt_hint": "メール下書き作成（メールを書いて・下書きして・メールを送りたい）",
+      "prompt_example": { "action": "gmail_draft_create", "to": "宛先メールアドレス", "subject": "件名", "body": "本文" },
+      "prompt_notes": "送信はしない。下書きのみ作成する。送信前に必ずユーザーが確認する。",
+      "command": { "subcommands": [], "args": [] },
+      "handler": "builtin:confirm_draft_create",
+      "display": "text"
+    }
+  ]
+}
