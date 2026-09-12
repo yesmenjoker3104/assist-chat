@@ -61,5 +61,54 @@ class TechNewsClient:
             args.append("--unread")
         return self.run(args)
 
+    def mark_read(self, article_ids: list[int]) -> dict:
+        if not article_ids:
+            return {"ok": True, "action": "mark_read", "updated": 0}
+        return self.run(["mark-read", *(str(article_id) for article_id in article_ids)])
+
     def fetch(self) -> dict:
         return self.run(["fetch"])
+
+    def list_sources(self) -> dict:
+        return self.run(["sources", "list"])
+
+    def count_per_source(self, status: str = "all") -> dict:
+        args = ["sources", "count"]
+        if status == "unread":
+            args.append("--unread")
+        elif status == "read":
+            args.append("--read")
+        return self.run(args)
+
+    def add_source(self, name: str, url: str, category: str | None = None) -> dict:
+        args = ["sources", "add", name, url]
+        if category:
+            args.extend(["--category", category])
+        return self.run(args)
+
+    def update_source(self, name: str, url: str | None = None, enabled: bool | None = None, category: str | None = None) -> dict:
+        args = ["sources", "update", name]
+        if url:
+            args.extend(["--url", url])
+        if enabled is True:
+            args.append("--enable")
+        elif enabled is False:
+            args.append("--disable")
+        if category is not None:
+            args.extend(["--category", category])
+        return self.run(args)
+
+    def delete_source(self, name: str) -> dict:
+        return self.run(["sources", "delete", name])
+
+    def list_categories(self) -> dict:
+        return self.run(["categories", "list"])
+
+    def add_category(self, name: str) -> dict:
+        return self.run(["categories", "add", name])
+
+    def rename_category(self, old_name: str, new_name: str) -> dict:
+        return self.run(["categories", "rename", old_name, new_name])
+
+    def delete_category(self, name: str) -> dict:
+        return self.run(["categories", "delete", name])

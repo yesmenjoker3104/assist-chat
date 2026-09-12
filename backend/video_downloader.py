@@ -1,6 +1,8 @@
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -8,6 +10,10 @@ from typing import Callable
 
 
 class VideoDownloadError(RuntimeError):
+    pass
+
+
+class VideoDownloadCancelled(VideoDownloadError):
     pass
 
 
@@ -26,6 +32,7 @@ class VideoDownloader:
         self.python_path = python_path
         self.cli_exe_path = Path(cli_exe_path) if cli_exe_path else None
         self.max_parallel_downloads = max(1, int(max_parallel_downloads))
+        self._playlist_support_cache: dict[str, bool] = {}
 
     @staticmethod
     def _is_runnable_bundle_exe(candidate: Path) -> bool:
@@ -41,7 +48,7 @@ class VideoDownloader:
             candidates.append(self.cli_exe_path)
         candidates.extend([
             self.project_dir / "YoutubeAudioDownloaderCli.exe",
-            self.project_dir / "release_runtime" / "YoutubeAudioDownloader" / "YoutubeAudioDownloaderCli.exe",
+            self.project_dir / "plugin" / "YoutubeAudioDownloader" / "YoutubeAudioDownloaderCli.exe",
             self.project_dir / "dist" / "YoutubeAudioDownloader" / "YoutubeAudioDownloaderCli.exe",
             self.project_dir / "youtube_dl" / "dist" / "YoutubeAudioDownloader" / "YoutubeAudioDownloaderCli.exe",
         ])
@@ -49,6 +56,25 @@ class VideoDownloader:
             if self._is_runnable_bundle_exe(candidate):
                 return candidate
         return None
+
+    def _cli_exe_supports_playlist(self, cli_exe: Path) -> bool:
+        cache_key = str(cli_exe)
+        if cache_key in self._playlist_support_cache:
+            return self._playlist_support_cache[cache_key]
+        supported = False
+        try:
+            result = subprocess.run(
+                [str(cli_exe), "download", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            supported = "--playlist" in (result.stdout or "")
+        except (OSError, subprocess.TimeoutExpired):
+            supported = False
+        self._playlist_support_cache[cache_key] = supported
+        return supported
 
     def _resolve_python(self) -> str:
         if self.python_path:
@@ -63,13 +89,11 @@ class VideoDownloader:
             return str(project_venv_candidate)
         return sys.executable
 
-    def _ensure_cli_environment(self) -> str:
+    def _ensure_cli_environment(self, need_separation: bool = False) -> str:
         python_exe = self._resolve_python()
-        probe = [
-            python_exe,
-            "-c",
-            "import PySide6, yt_dlp, demucs, pydub, PIL; print('ok')",
-        ]
+        # 音源分離（demucs/torch）は数GB規模のため、ステム指定時のみ要求する。
+        probe_modules = "PySide6, yt_dlp" + (", demucs, pydub, PIL" if need_separation else "")
+        probe = [python_exe, "-c", f"import {probe_modules}; print('ok')"]
         try:
             subprocess.run(
                 probe,
@@ -80,7 +104,6 @@ class VideoDownloader:
             )
             return python_exe
         except (OSError, subprocess.CalledProcessError):
-            project_requirements = self.project_dir / "youtube_dl" / "requirements.txt"
             venv_dir = self.project_dir / "youtube_dl" / "venv"
             if not venv_dir.exists():
                 venv_dir.mkdir(parents=True, exist_ok=True)
@@ -95,8 +118,11 @@ class VideoDownloader:
             python_candidate = venv_dir / "Scripts" / "python.exe"
             if not python_candidate.exists():
                 return python_exe
+            packages = ["PySide6>=6.5.0", "yt-dlp>=2024.1.1"]
+            if need_separation:
+                packages += ["demucs>=4.0.0", "pydub>=0.25.1", "Pillow>=10.0.0"]
             subprocess.run(
-                [str(python_candidate), "-m", "pip", "install", "-r", str(project_requirements), "--disable-pip-version-check"],
+                [str(python_candidate), "-m", "pip", "install", *packages, "--disable-pip-version-check"],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -116,9 +142,14 @@ class VideoDownloader:
         audio_only: bool,
         progress_callback: Callable[[str], None] | None = None,
         stems: list[str] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        allow_playlist: bool = False,
     ) -> str:
         cli_exe = self._resolve_cli_exe()
-        if cli_exe:
+        use_bundled_exe = bool(cli_exe) and not (
+            allow_playlist and not self._cli_exe_supports_playlist(cli_exe)
+        )
+        if use_bundled_exe:
             command = [
                 str(cli_exe),
                 "download",
@@ -128,7 +159,12 @@ class VideoDownloader:
             ]
             cwd = str(cli_exe.parent)
         else:
-            python_exe = self._ensure_cli_environment()
+            if allow_playlist and cli_exe and not self.cli_dir.exists():
+                raise VideoDownloadError(
+                    "プレイリスト対応版の動画ダウンロードCLIが未配置です。"
+                    "youtube-audio-downloader のCLIを最新版に再ビルドしてください。"
+                )
+            python_exe = self._ensure_cli_environment(need_separation=bool(stems))
             command = [
                 python_exe,
                 "cli.py",
@@ -141,10 +177,11 @@ class VideoDownloader:
 
         if not audio_only:
             command.append("--mp4")
+        if allow_playlist:
+            command.append("--playlist")
         if stems:
             command.extend(["--stems", *stems])
         process = None
-        started_at = time.monotonic()
         try:
             process = subprocess.Popen(
                 command,
@@ -157,8 +194,33 @@ class VideoDownloader:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 env={**os.environ, "PYTHONUTF8": "1"},
             )
+            # パイプバッファのデッドロックを避けるため別スレッドで読み続ける
+            line_queue: queue.Queue[str | None] = queue.Queue()
+
+            def _drain(proc, q):
+                try:
+                    for line in proc.stdout:
+                        q.put(line)
+                finally:
+                    q.put(None)
+
+            reader = threading.Thread(target=_drain, args=(process, line_queue), daemon=True)
+            reader.start()
+
+            output_lines: list[str] = []
             last_report = 0.0
-            while process.poll() is None:
+            started_at = time.monotonic()
+            while True:
+                if cancel_requested and cancel_requested():
+                    process.kill()
+                    raise VideoDownloadCancelled("ダウンロードをキャンセルしました。")
+                try:
+                    line = line_queue.get(timeout=1.0)
+                    if line is None:
+                        break
+                    output_lines.append(line)
+                except queue.Empty:
+                    pass
                 elapsed = time.monotonic() - started_at
                 if progress_callback and elapsed - last_report >= 5:
                     progress_callback(f"ダウンロード中... 経過 {int(elapsed)}秒")
@@ -166,8 +228,9 @@ class VideoDownloader:
                 if elapsed >= 7200:
                     process.kill()
                     raise subprocess.TimeoutExpired(command, 7200)
-                time.sleep(1)
-            output = process.communicate()[0] or ""
+
+            process.wait()
+            output = "".join(output_lines)
             result_code = process.returncode
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise VideoDownloadError(f"動画ダウンロードの実行に失敗しました: {exc}") from exc
@@ -197,6 +260,8 @@ class VideoDownloader:
         progress_callback: Callable[[str], None] | None = None,
         output_dir: str | None = None,
         stems: list[str] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        allow_playlist: bool = False,
     ) -> str:
         targets = [self._validate_url(url) for url in urls]
         if not targets:
@@ -220,9 +285,13 @@ class VideoDownloader:
             report(f"処理開始: {len(targets)}件 / 同時実行 {worker_count}件")
 
             def run_one(url: str) -> str:
+                if cancel_requested and cancel_requested():
+                    raise VideoDownloadCancelled("ダウンロードをキャンセルしました。")
                 report(f"開始: {url}")
                 try:
-                    out = self._run_single_download(url, audio_only, report, stems)
+                    out = self._run_single_download(
+                        url, audio_only, report, stems, cancel_requested, allow_playlist
+                    )
                 except VideoDownloadError:
                     report(f"失敗: {url}")
                     raise
@@ -231,9 +300,13 @@ class VideoDownloader:
 
             if worker_count == 1:
                 for index, url in enumerate(targets, 1):
+                    if cancel_requested and cancel_requested():
+                        raise VideoDownloadCancelled("ダウンロードをキャンセルしました。")
                     report(f"キュー投入 {index}/{len(targets)}: {url}")
                     try:
                         outputs.append(run_one(url))
+                    except VideoDownloadCancelled:
+                        raise
                     except VideoDownloadError as exc:
                         errors.append(f"{url}: {exc}")
             else:
@@ -245,6 +318,8 @@ class VideoDownloader:
                     for future, url in futures.items():
                         try:
                             outputs.append(future.result())
+                        except VideoDownloadCancelled:
+                            raise
                         except VideoDownloadError as exc:
                             errors.append(f"{url}: {exc}")
 
@@ -263,8 +338,13 @@ class VideoDownloader:
         progress_callback: Callable[[str], None] | None = None,
         output_dir: str | None = None,
         stems: list[str] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        allow_playlist: bool = False,
     ) -> str:
-        return self._run_download([url], audio_only, progress_callback, output_dir, stems)
+        return self._run_download(
+            [url], audio_only, progress_callback, output_dir, stems,
+            cancel_requested, allow_playlist,
+        )
 
     def download_many(
         self,
@@ -273,5 +353,10 @@ class VideoDownloader:
         progress_callback: Callable[[str], None] | None = None,
         output_dir: str | None = None,
         stems: list[str] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        allow_playlist: bool = False,
     ) -> str:
-        return self._run_download(urls, audio_only, progress_callback, output_dir, stems)
+        return self._run_download(
+            urls, audio_only, progress_callback, output_dir, stems,
+            cancel_requested, allow_playlist,
+        )

@@ -110,7 +110,7 @@ class GoogleWorkspace:
                 raise GwsError("終日予定の日付形式が正しくありません。") from exc
             if end_date <= start_date:
                 end_date = start_date + timedelta(days=1)
-            event["start"] = {"date": start}
+            event["start"] = {"date": start_date.isoformat()}
             event["end"] = {"date": end_date.isoformat()}
         else:
             try:
@@ -135,3 +135,30 @@ class GoogleWorkspace:
             "calendar", "events", "delete",
             "--params", json.dumps({"calendarId": "primary", "eventId": event_id}),
         ])
+
+    def is_auth_error(self, message: str) -> bool:
+        keywords = (
+            "Access denied",
+            "No credentials",
+            "auth login",
+            "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+            "invalid_grant",
+            "Token has been expired or revoked",
+            "insufficient authentication scopes",
+        )
+        return any(k in message for k in keywords)
+
+    def auth_login(self) -> None:
+        import os
+        import tempfile
+        exe = self._executable()
+        gcloud_bin = os.path.expandvars(r"%LOCALAPPDATA%\Google\Cloud SDK\google-cloud-sdk\bin")
+        bat = tempfile.NamedTemporaryFile(suffix=".bat", delete=False, mode="w", encoding="utf-8")
+        bat.write(
+            f'@echo off\n'
+            f'set PATH={gcloud_bin};%PATH%\n'
+            f'"{exe}" auth setup --login\n'
+            f'pause\n'
+        )
+        bat.close()
+        os.startfile(bat.name)

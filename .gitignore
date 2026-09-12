@@ -10,7 +10,7 @@ setup-background.log
 # 配布物・大容量バイナリ（setup.ps1/run.ps1が取得）
 ollama/
 models/
-release_runtime/
+plugin/
 
 # 誤生成フォルダ
 None/
