@@ -161,6 +161,25 @@ if (-not (Test-Path $GcalCli)) {
 }
 Write-Host "GCalCtrl CLI ready: $GcalCli"
 
+# GMailCtrl CLIのセットアップ
+$GmailDir = Join-Path $Root "plugin\GmailCtrl"
+$GmailCli = Join-Path $GmailDir "GMailCtrlCli.exe"
+$GmailZip = Join-Path $env:TEMP "GMailCtrlCli-Windows.zip"
+
+if (-not (Test-Path $GmailCli)) {
+    Write-Host "Downloading GMailCtrl CLI..."
+    New-Item -ItemType Directory -Force -Path $GmailDir | Out-Null
+    & gh release download dev-latest --repo yesmenjoker3104/gmail-ctrl --pattern "GMailCtrlCli-Windows.zip" --dir $env:TEMP --clobber
+    if ($LASTEXITCODE -ne 0) { throw "GMailCtrl CLI download failed." }
+    if (-not (Test-Path $GmailZip)) { throw "GMailCtrlCli-Windows.zip not found after download." }
+    Expand-Archive -LiteralPath $GmailZip -DestinationPath $GmailDir -Force
+    Remove-Item -LiteralPath $GmailZip -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $GmailCli)) {
+        throw "GMailCtrlCli.exe was not found after extracting."
+    }
+}
+Write-Host "GMailCtrl CLI ready: $GmailCli"
+
 if (-not (Test-Path $OllamaExe)) {
     Write-Host "Downloading Ollama into the project folder..."
     & curl.exe -L $OllamaUrl -o $OllamaZip
