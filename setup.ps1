@@ -1,12 +1,26 @@
+param(
+    [string]$Model = "qwen2.5:7b"
+)
+
 # Assist Chat 初回セットアップ
 # Ollama本体とローカルLLMモデルを自動で準備します。
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
+$venv = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path $venv)) {
+    $bootstrapPython = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $bootstrapPython) { throw "Python was not found. Install Python once to create .venv." }
+    Write-Host "Creating project Python environment..."
+    & $bootstrapPython.Source -m venv (Join-Path $Root ".venv")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venv)) { throw "Failed to create .venv." }
+}
+
+& $venv -m pip install -r (Join-Path $Root "requirements.txt") --disable-pip-version-check
+
 $OllamaDir = Join-Path $Root "ollama"
 $ModelsDir = Join-Path $Root "models"
 $OllamaExe = Join-Path $OllamaDir "ollama.exe"
-$Model = "qwen2.5:7b"
 $OllamaZip = Join-Path $env:TEMP "assist-chat-ollama-windows-amd64.zip"
 $OllamaUrl = "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip"
 
@@ -53,7 +67,32 @@ if ($gws -is [System.IO.FileInfo]) {
 }
 if (-not $gws) {
     $npm = Get-Command npm -ErrorAction SilentlyContinue
-    if (-not $npm) { throw "gws was not found. Install Node.js/npm." }
+    if (-not $npm) {
+        $npmCandidates = @(
+            (Join-Path $env:ProgramFiles "nodejs\npm.cmd"),
+            (Join-Path $env:LOCALAPPDATA "Programs\nodejs\npm.cmd")
+        )
+        $npmPath = $npmCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($npmPath) {
+            $env:Path = "$(Split-Path $npmPath);$env:Path"
+            $npm = Get-Command npm -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $npm) {
+        $winget = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"
+        if (-not (Test-Path $winget)) { throw "Node.js/npm was not found and winget is unavailable." }
+        Write-Host "Installing Node.js LTS..."
+        & $winget install --id OpenJS.NodeJS.LTS --exact --accept-source-agreements --accept-package-agreements
+        if ($LASTEXITCODE -ne 0) { throw "Node.js installation failed." }
+        $npmCandidates = @(
+            (Join-Path $env:ProgramFiles "nodejs\npm.cmd"),
+            (Join-Path $env:LOCALAPPDATA "Programs\nodejs\npm.cmd")
+        )
+        $npmPath = $npmCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($npmPath) { $env:Path = "$(Split-Path $npmPath);$env:Path" }
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+    }
+    if (-not $npm) { throw "Node.js/npm was not found after installation." }
     Write-Host "Installing Google Workspace CLI..."
     & npm install --global @googleworkspace/cli --allow-scripts=@googleworkspace/cli
     if ($LASTEXITCODE -ne 0) { throw "Google Workspace CLI installation failed." }
@@ -151,10 +190,22 @@ if (-not (Test-Path $GcalCli)) {
     Write-Host "Downloading GCalCtrl CLI..."
     New-Item -ItemType Directory -Force -Path $GcalDir | Out-Null
     & gh release download dev-latest --repo yesmenjoker3104/gcal-ctrl --pattern "GCalCtrlCli-Windows.zip" --dir $env:TEMP --clobber
-    if ($LASTEXITCODE -ne 0) { throw "GCalCtrl CLI download failed." }
-    if (-not (Test-Path $GcalZip)) { throw "GCalCtrlCli-Windows.zip not found after download." }
-    Expand-Archive -LiteralPath $GcalZip -DestinationPath $GcalDir -Force
-    Remove-Item -LiteralPath $GcalZip -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $GcalZip)) {
+        Expand-Archive -LiteralPath $GcalZip -DestinationPath $GcalDir -Force
+        Remove-Item -LiteralPath $GcalZip -Force -ErrorAction SilentlyContinue
+    } else {
+        $gcalSourceDir = Join-Path $Root "..\gcal-ctrl"
+        $gcalBuildScript = Join-Path $gcalSourceDir "build.ps1"
+        if (-not (Test-Path $gcalBuildScript)) {
+            throw "GCalCtrl CLI download failed and local gcal-ctrl source was not found."
+        }
+        Write-Host "GCalCtrl release has no downloadable asset. Building from local source..."
+        & $gcalBuildScript
+        if ($LASTEXITCODE -ne 0) { throw "GCalCtrl CLI build failed." }
+        $gcalBuiltExe = Join-Path $gcalSourceDir "dist\GCalCtrlCli.exe"
+        if (-not (Test-Path $gcalBuiltExe)) { throw "GCalCtrlCli.exe was not found after local build." }
+        Copy-Item -LiteralPath $gcalBuiltExe -Destination $GcalCli -Force
+    }
     if (-not (Test-Path $GcalCli)) {
         throw "GCalCtrlCli.exe was not found after extracting."
     }
@@ -203,9 +254,22 @@ if (-not $server) {
 Write-Host "Preparing local model $Model..."
 $modelList = & $OllamaExe list
 if ($LASTEXITCODE -ne 0 -or -not ($modelList | Select-String -SimpleMatch $Model)) {
-    Write-Host "Downloading model into the project models folder..."
-    & $OllamaExe pull $Model
-    if ($LASTEXITCODE -ne 0) { throw "LLM model download failed." }
+    $modelDownloaded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "Downloading model into the project models folder (attempt $attempt/3)..."
+        & $OllamaExe pull $Model
+        if ($LASTEXITCODE -eq 0) {
+            $modelDownloaded = $true
+            break
+        }
+        if ($attempt -lt 3) {
+            Write-Warning "LLM model download failed. Retrying in 10 seconds..."
+            Start-Sleep -Seconds 10
+        }
+    }
+    if (-not $modelDownloaded) {
+        throw "LLM model download failed after 3 attempts. Try a smaller model, for example: .\setup.ps1 -Model qwen2.5:1.5b"
+    }
 }
 if (-not (& $OllamaExe list | Select-String -SimpleMatch $Model)) {
     throw "LLM model $Model was not found after download."

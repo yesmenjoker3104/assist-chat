@@ -16,10 +16,11 @@ if (-not (Test-Path $venv)) {
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venv)) { throw "Failed to create .venv." }
 }
 
-# ここから先はシステムPythonを使わず、プロジェクト内のPythonだけを使う。
-& $venv -m pip install -r (Join-Path $PSScriptRoot "requirements.txt") --disable-pip-version-check
 if ($Setup) {
     Set-ExecutionPolicy -Scope Process Bypass
     & (Join-Path $PSScriptRoot "setup.ps1")
+} else {
+    # ここから先はシステムPythonを使わず、プロジェクト内のPythonだけを使う。
+    & $venv -m pip install -r (Join-Path $PSScriptRoot "requirements.txt") --disable-pip-version-check
 }
 & $venv (Join-Path $PSScriptRoot "main.py")
