@@ -11,5 +11,9 @@ setup-background.log
 ollama/
 models/
 
+# exeビルド成果物（build.ps1が生成）
+/AssistChat.exe
+/build/
+
 # 誤生成フォルダ
 None/

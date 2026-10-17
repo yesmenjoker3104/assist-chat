@@ -25,6 +25,32 @@ Google Calendar/GmailのOAuth認証は、Googleアカウントの許可が必要
 gws auth setup --login
 ```
 
+## exe で起動する
+
+プロジェクトフォルダで次を実行すると、プロジェクト直下に `AssistChat.exe` を作成できます。PyInstaller は `.venv` に導入されます。
+
+```powershell
+.\build.ps1
+```
+
+以後は `AssistChat.exe` をダブルクリックして起動できます（コンソール画面は表示されません）。
+
+- exe は自身と同じフォルダの `data/`・`plugin/`・`ollama/`・`models/` を使います。exe はプロジェクトフォルダ内に置いてください（別の場所へ移すと、設定・履歴・プラグインが見つかりません）。
+- 初回の Ollama・モデル準備は従来どおり `.\run.ps1 -Setup` で行います。
+- ソースを変更したら `.\build.ps1` を再実行してください。
+
+## バージョン管理と自動更新
+
+- バージョンは `version.py` の `__version__` で管理します。画面のメニュー「ヘルプ > バージョン情報」で確認できます。
+- 「ヘルプ > 更新を確認」で GitHub Releases の最新版を確認し、新しければ `AssistChat.exe` をダウンロードして差し替え、再起動します。更新は exe 版のみ対応です（ソースから起動した場合は案内のみ表示されます）。
+- 差し替えは exe 1 ファイルだけです。`data/`・`plugin/`・`ollama/`・`models/` は変更されません。
+
+リリース手順:
+
+1. `version.py` の `__version__` を新しいバージョン（例: `0.2.0`）に上げてコミットします。
+2. タグ `v0.2.0` を作成して push します（タグ名と `version.py` が一致している必要があります）。
+3. GitHub Actions の `windows-release.yml` が `build.ps1` で exe をビルドし、GitHub Releases に `AssistChat.exe` を公開します。
+
 ## プラグインシステム
 
 `plugin/<ModuleName>/` にモジュールフォルダを置き、`plugin.json` マニフェストを追加するだけで、起動時に自動認識されてLLMが新しい操作を理解するようになります。コードの変更は不要です。

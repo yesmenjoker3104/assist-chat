@@ -1,12 +1,12 @@
 import sys
-from pathlib import Path
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+from config import RESOURCE_DIR
 from gui.main_window import MainWindow
 
-_ICON_PATH = Path(__file__).parent / "gui" / "icon" / "icon.ico"
+_ICON_PATH = RESOURCE_DIR / "gui" / "icon" / "icon.ico"
 _APP_USER_MODEL_ID = "USER.AssistChat"
 
 

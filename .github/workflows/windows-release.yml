@@ -1,0 +1,52 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $tagVersion = $env:TAG_NAME.TrimStart('v')
+          $match = Select-String -Path version.py -Pattern '__version__\s*=\s*"([^"]+)"'
+          $appVersion = $match.Matches[0].Groups[1].Value
+          if ($appVersion -ne $tagVersion) {
+            throw "version.py is $appVersion but the tag is $tagVersion. Update version.py before tagging."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build AssistChat.exe
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AssistChat.exe
+          path: AssistChat.exe
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AssistChat.exe
+          generate_release_notes: true

@@ -2,20 +2,49 @@ import atexit
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMainWindow, QTextBrowser, QVBoxLayout
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMainWindow, QMessageBox, QTextBrowser, QVBoxLayout
 
 from backend.llm_engine import OllamaEngine
 from backend.plugin_manager import PluginManager
 from backend.tech_news import TechNewsClient
+from backend.updater import (
+    ReleaseInfo,
+    download_release,
+    fetch_latest_release,
+    start_update_process,
+)
 from backend.video_downloader import VideoDownloader
 from config import BASE_DIR, OLLAMA_EXE, OLLAMA_MODELS_DIR, load_settings
 from gui.chat_widget import ChatWidget
 from gui.settings_dialog import SettingsDialog
+from version import __version__
+
+
+class UpdateWorker(QThread):
+    no_update = pyqtSignal()
+    update_ready = pyqtSignal(object, str)
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            release = fetch_latest_release()
+            if release is None:
+                self.no_update.emit()
+                return
+            staged_exe = download_release(
+                release,
+                Path(tempfile.mkdtemp(prefix="assist-chat-download-")) / "AssistChat.exe",
+            )
+            self.update_ready.emit(release, str(staged_exe))
+        except Exception as error:
+            self.failed.emit(str(error))
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +78,15 @@ class MainWindow(QMainWindow):
         plugin_list_action = QAction("プラグイン一覧", self)
         plugin_list_action.triggered.connect(self.show_plugin_list)
         plugin_menu.addAction(plugin_list_action)
+
+        help_menu = self.menuBar().addMenu("ヘルプ")
+        version_action = QAction("バージョン情報", self)
+        version_action.triggered.connect(self.show_version_info)
+        help_menu.addAction(version_action)
+        self.check_update_action = QAction("更新を確認", self)
+        self.check_update_action.triggered.connect(self.check_for_updates)
+        help_menu.addAction(self.check_update_action)
+        self._update_worker: UpdateWorker | None = None
         self.chat = ChatWidget(
             self.llm,
             self.downloader,
@@ -257,6 +295,68 @@ class MainWindow(QMainWindow):
             if self.ollama_process:
                 self.ollama_process.terminate()
         self.ollama_pid = None
+
+    def show_version_info(self) -> None:
+        QMessageBox.information(
+            self,
+            "バージョン情報",
+            f"Assist Chat\nバージョン: v{__version__}",
+        )
+
+    def check_for_updates(self) -> None:
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "更新確認",
+                "更新確認は exe 版で起動したときに利用できます。",
+            )
+            return
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self.check_update_action.setEnabled(False)
+        self._update_worker = UpdateWorker(self)
+        self._update_worker.no_update.connect(self._show_no_update)
+        self._update_worker.update_ready.connect(self._confirm_update)
+        self._update_worker.failed.connect(self._show_update_error)
+        self._update_worker.finished.connect(self._update_finished)
+        self._update_worker.start()
+
+    def _show_no_update(self) -> None:
+        QMessageBox.information(
+            self,
+            "更新確認",
+            f"現在のバージョン v{__version__} は最新版です。",
+        )
+
+    def _confirm_update(self, release: object, staged_exe: str) -> None:
+        if not isinstance(release, ReleaseInfo):
+            self._show_update_error("更新データの形式が不正です")
+            return
+        answer = QMessageBox.question(
+            self,
+            "更新があります",
+            f"バージョン {release.version} に更新します。アプリを再起動しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            start_update_process(Path(staged_exe), Path(sys.executable).resolve())
+            self.close()
+        except Exception as error:
+            self._show_update_error(str(error))
+
+    def _show_update_error(self, message: str) -> None:
+        QMessageBox.critical(
+            self,
+            "更新失敗",
+            f"更新を確認できませんでした。\n{message}",
+        )
+
+    def _update_finished(self) -> None:
+        self.check_update_action.setEnabled(True)
+        self._update_worker = None
 
     def closeEvent(self, event):
         self.stop_ollama()

@@ -8,10 +8,12 @@
 
 - 作業ディレクトリ: `D:\dev\assist-chat`
 - Python環境: プロジェクト内の`.venv`
-- 起動: `.\run.ps1`
+- 起動: `.\run.ps1`（開発時）。exe版は `.\build.ps1` で `AssistChat.exe` をプロジェクト直下に生成して起動する。
 - Pythonの依存パッケージは必ず`.venv\Scripts\python.exe`へインストールする。
 - システムPythonへ`pip install`しない。
 - `.venv`作成時に限り、システムPythonをブートストラップとして使用してよい。
+- exe版（`sys.frozen`）では`config.BASE_DIR`がexeの配置フォルダになる。新しいパスは`config.BASE_DIR`/`config.RESOURCE_DIR`から組み立て、`__file__`を基準にしない。
+- 凍結時の`sys.executable`はアプリ本体のため、Pythonとして実行しない（`backend/video_downloader.py`の`_python_interpreter()`を使う）。
 
 ## コア構成
 
@@ -25,6 +27,10 @@
 | `gui/chat_widget.py` | チャットUI、LLM解釈、操作確認フロー |
 | `setup.ps1` | gcloud、gws、Ollama、LLMモデルの初回準備 |
 | `run.ps1` | `.venv`、依存関係、セットアップ、アプリ起動 |
+| `build.ps1` | PyInstallerで`AssistChat.exe`（ウィンドウ版・onefile）をプロジェクト直下へビルド |
+| `version.py` | `__version__`。リリースタグ（`vX.Y.Z`）と一致させる |
+| `backend/updater.py` | GitHub Releasesの最新版確認、exeダウンロード、差し替え用PowerShell起動 |
+| `.github/workflows/windows-release.yml` | `v*`タグでexeをビルドし、GitHub Releasesへ`AssistChat.exe`を公開 |
 
 ## 安全上のルール
 
@@ -127,6 +133,7 @@ PowerShellを変更した場合は、実行前に構文解析する。
 ```powershell
 [scriptblock]::Create((Get-Content .\run.ps1 -Raw)) | Out-Null
 [scriptblock]::Create((Get-Content .\setup.ps1 -Raw)) | Out-Null
+[scriptblock]::Create((Get-Content .\build.ps1 -Raw)) | Out-Null
 ```
 
 READMEと起動手順を変更した場合は、このファイルの関連ルールも更新する。

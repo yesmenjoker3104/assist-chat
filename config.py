@@ -1,7 +1,14 @@
 import json
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+# exe 化時は __file__ が一時展開先を指すため、exe と同じフォルダを基準にする
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+# PyInstaller に同梱したリソース（アイコンなど）の場所。開発時は BASE_DIR と同じ
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
 DATA_DIR = BASE_DIR / "data"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 HISTORY_DATABASE_FILE = DATA_DIR / "chat_history.db"

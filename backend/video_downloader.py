@@ -1,5 +1,6 @@
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,6 +16,18 @@ class VideoDownloadError(RuntimeError):
 
 class VideoDownloadCancelled(VideoDownloadError):
     pass
+
+
+def _python_interpreter() -> str:
+    # exe 化時の sys.executable はアプリ本体なので、ソース版CLIの実行には使えない
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    python = shutil.which("python")
+    if not python:
+        raise VideoDownloadError(
+            "ソース版の動画CLIを実行するにはPythonが必要です。PATHにpythonを追加してください。"
+        )
+    return python
 
 
 class VideoDownloader:
@@ -87,7 +100,7 @@ class VideoDownloader:
         project_venv_candidate = self.project_dir / "venv" / "Scripts" / "python.exe"
         if project_venv_candidate.exists():
             return str(project_venv_candidate)
-        return sys.executable
+        return _python_interpreter()
 
     def _ensure_cli_environment(self, need_separation: bool = False) -> str:
         python_exe = self._resolve_python()
@@ -107,7 +120,7 @@ class VideoDownloader:
             venv_dir = self.project_dir / "youtube_dl" / "venv"
             if not venv_dir.exists():
                 venv_dir.mkdir(parents=True, exist_ok=True)
-                bootstrap_python = sys.executable
+                bootstrap_python = _python_interpreter()
                 subprocess.run(
                     [bootstrap_python, "-m", "venv", str(venv_dir)],
                     check=True,
