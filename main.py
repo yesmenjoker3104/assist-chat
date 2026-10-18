@@ -27,8 +27,8 @@ def main():
     app.setWindowIcon(icon)
     window = MainWindow()
     window.setWindowIcon(icon)
-    window.status.setText(window.start_ollama())
     window.show()
+    window.prepare_ollama()
     sys.exit(app.exec())
 
 

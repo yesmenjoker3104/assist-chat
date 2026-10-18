@@ -21,6 +21,7 @@
 |---|---|
 | `main.py` | アプリケーション起動 |
 | `backend/llm_engine.py` | Ollama REST APIラッパー |
+| `backend/ollama_installer.py` | 未配置時のOllama公式ZIPダウンロード・展開、サーバー起動 |
 | `backend/plugin_manager.py` | プラグイン発見・ルーティング・CLI実行 |
 | `config.py` | 設定とプロジェクト内データパス |
 | `gui/main_window.py` | メインウィンドウとOllama起動管理 |
@@ -42,9 +43,9 @@
 
 ## OllamaとGoogle CLI
 
-- Ollamaはプロジェクト内の`ollama\ollama.exe`だけを使用し、PATHやシステムインストール版は使用しない。未配置時はsetup.ps1が公式配布ZIPをollamaフォルダへ展開する。
+- Ollamaはプロジェクト内の`ollama\ollama.exe`だけを使用し、PATHやシステムインストール版は使用しない。未配置時はアプリ起動時に`backend/ollama_installer.py`が公式配布ZIPをollamaフォルダへ展開する（exeは同梱しない）。
 - Ollamaモデル格納先はプロジェクト内の`models`を基本とする。
-- Ollama本体・モデルのダウンロードはsetup.ps1が行い、ユーザーへ個別操作を要求しない。
+- Ollama本体・モデルの初回取得は`gui/main_window.py`の`prepare_ollama`が行い、ユーザーへ個別操作を要求しない。`setup.ps1`は開発環境・gws準備用として残す。
 - Google連携には`gcloud`と`gws`が必要。`setup.ps1`で検出・導入する。
 - Google OAuthの同意、アカウント選択、テストユーザー設定はブラウザーでのユーザー操作が必要。
 

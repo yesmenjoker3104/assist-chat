@@ -1,5 +1,5 @@
 import atexit
-import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,9 +9,19 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMainWindow, QMessageBox, QTextBrowser, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QTextBrowser,
+    QVBoxLayout,
+)
 
 from backend.llm_engine import OllamaEngine
+from backend.ollama_installer import install_ollama, launch_ollama_server
 from backend.plugin_manager import PluginManager
 from backend.tech_news import TechNewsClient
 from backend.updater import (
@@ -21,7 +31,7 @@ from backend.updater import (
     start_update_process,
 )
 from backend.video_downloader import VideoDownloader
-from config import BASE_DIR, OLLAMA_EXE, OLLAMA_MODELS_DIR, load_settings
+from config import BASE_DIR, OLLAMA_EXE, load_settings
 from gui.chat_widget import ChatWidget
 from gui.settings_dialog import SettingsDialog
 from version import __version__
@@ -45,6 +55,57 @@ class UpdateWorker(QThread):
             self.update_ready.emit(release, str(staged_exe))
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class OllamaSetupWorker(QThread):
+    progress = pyqtSignal(str, int)
+    server_started = pyqtSignal(object)
+    succeeded = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    _PULL_ATTEMPTS = 3
+    _PERCENT_PATTERN = re.compile(r"(\d{1,3})%")
+
+    def __init__(self, llm: OllamaEngine, parent=None):
+        super().__init__(parent)
+        self.llm = llm
+
+    def run(self) -> None:
+        try:
+            if not OLLAMA_EXE.exists():
+                self.progress.emit("Ollamaをダウンロードしています...", 0)
+                install_ollama(lambda percent: self.progress.emit("Ollamaをダウンロードしています...", percent))
+            if not self.llm.health_check():
+                self.progress.emit("Ollamaサーバーを起動しています...", -1)
+                self.server_started.emit(launch_ollama_server())
+                for _ in range(60):
+                    if self.llm.health_check():
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError("Ollamaサーバーの起動を確認できませんでした。")
+            if not self.llm.has_model():
+                self._pull_model()
+            self.succeeded.emit()
+        except Exception as error:
+            self.failed.emit(str(error))
+
+    def _pull_model(self) -> None:
+        model = self.llm.model
+        error = ""
+        for attempt in range(1, self._PULL_ATTEMPTS + 1):
+            self.progress.emit(f"モデル {model} をダウンロードしています...（{attempt}/{self._PULL_ATTEMPTS}）", -1)
+            ok, error = self.llm.pull_model(model, progress_callback=self._on_pull_output)
+            if ok:
+                return
+            if attempt < self._PULL_ATTEMPTS:
+                time.sleep(10)
+        raise RuntimeError(f"モデル {model} のダウンロードに失敗しました。\n{error}")
+
+    def _on_pull_output(self, line: str) -> None:
+        match = self._PERCENT_PATTERN.search(line)
+        percent = int(match.group(1)) if match else -1
+        self.progress.emit(f"モデル {self.llm.model} をダウンロードしています...", percent)
 
 
 class MainWindow(QMainWindow):
@@ -87,6 +148,8 @@ class MainWindow(QMainWindow):
         self.check_update_action.triggered.connect(self.check_for_updates)
         help_menu.addAction(self.check_update_action)
         self._update_worker: UpdateWorker | None = None
+        self._setup_worker: OllamaSetupWorker | None = None
+        self._setup_progress: QProgressDialog | None = None
         self.chat = ChatWidget(
             self.llm,
             self.downloader,
@@ -228,6 +291,74 @@ class MainWindow(QMainWindow):
         else:
             self.chat.tech_news_timer.stop()
 
+    def prepare_ollama(self) -> None:
+        if OLLAMA_EXE.exists() or self.llm.health_check():
+            self.status.setText(self.start_ollama())
+            return
+        answer = QMessageBox.question(
+            self,
+            "Ollamaの準備",
+            "Ollamaが見つかりません。公式配布元からダウンロードし、"
+            f"モデル {self.llm.model} も取得します。\n"
+            "通信量は数GBかかります。続行しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.status.setText(self.start_ollama())
+            return
+        self._start_ollama_setup()
+
+    def _start_ollama_setup(self) -> None:
+        self._setup_progress = QProgressDialog("Ollamaを準備しています...", None, 0, 100, self)
+        self._setup_progress.setWindowTitle("Ollamaの準備")
+        self._setup_progress.setCancelButton(None)
+        self._setup_progress.setMinimumDuration(0)
+        self._setup_progress.setAutoClose(False)
+        self._setup_progress.setAutoReset(False)
+        self._setup_progress.setValue(0)
+        self._setup_worker = OllamaSetupWorker(self.llm, self)
+        self._setup_worker.progress.connect(self._on_ollama_setup_progress)
+        self._setup_worker.server_started.connect(self._on_ollama_server_started)
+        self._setup_worker.succeeded.connect(self._on_ollama_setup_succeeded)
+        self._setup_worker.failed.connect(self._on_ollama_setup_failed)
+        self._setup_worker.start()
+
+    def _on_ollama_setup_progress(self, message: str, percent: int) -> None:
+        if self._setup_progress is None:
+            return
+        self._setup_progress.setLabelText(message)
+        if percent < 0:
+            self._setup_progress.setRange(0, 0)
+        else:
+            if self._setup_progress.maximum() == 0:
+                self._setup_progress.setRange(0, 100)
+            self._setup_progress.setValue(percent)
+
+    def _on_ollama_server_started(self, process: subprocess.Popen) -> None:
+        self.ollama_process = process
+        self.ollama_pid = process.pid
+        atexit.register(self.stop_ollama)
+
+    def _on_ollama_setup_succeeded(self) -> None:
+        self._close_ollama_setup_progress()
+        self.status.setText(self._ollama_status_text("接続済み"))
+        QMessageBox.information(self, "Ollamaの準備", "Ollamaとモデルの準備が完了しました。")
+
+    def _on_ollama_setup_failed(self, message: str) -> None:
+        self._close_ollama_setup_progress()
+        self.status.setText(self._ollama_status_text("準備に失敗"))
+        QMessageBox.critical(
+            self,
+            "Ollamaの準備失敗",
+            f"Ollamaの準備に失敗しました。\n{message}\n\n通信状況を確認して、アプリを再起動してください。",
+        )
+
+    def _close_ollama_setup_progress(self) -> None:
+        if self._setup_progress is not None:
+            self._setup_progress.close()
+            self._setup_progress = None
+
     def start_ollama(self) -> str:
         if self.llm.health_check():
             # 前回終了時の孤立プロセスなど、既存起動分も終了対象として追跡する
@@ -237,11 +368,7 @@ class MainWindow(QMainWindow):
         executable = str(OLLAMA_EXE) if OLLAMA_EXE.exists() else None
         if not executable:
             return self._ollama_status_text("実行ファイルが見つかりません")
-        self.ollama_process = subprocess.Popen(
-            [executable, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            env={**os.environ, "OLLAMA_NOHISTORY": "1", "OLLAMA_MODELS": str(OLLAMA_MODELS_DIR)},
-        )
+        self.ollama_process = launch_ollama_server()
         self.ollama_pid = self.ollama_process.pid
         atexit.register(self.stop_ollama)
         for _ in range(30):
