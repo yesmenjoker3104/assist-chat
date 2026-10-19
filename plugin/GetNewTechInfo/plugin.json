@@ -1,6 +1,6 @@
 {
   "name": "GetNewTechInfo",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "技術記事の取得・管理（RSS/Atom フィード）",
   "executable": "GetNewTechInfoCli.exe",
   "actions": [
