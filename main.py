@@ -7,7 +7,7 @@ from config import RESOURCE_DIR
 from gui.main_window import MainWindow
 
 _ICON_PATH = RESOURCE_DIR / "gui" / "icon" / "icon.ico"
-_APP_USER_MODEL_ID = "USER.AssistChat"
+_APP_USER_MODEL_ID = "AssistChat.App"
 
 
 def _set_app_user_model_id() -> None:
