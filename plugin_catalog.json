@@ -4,6 +4,11 @@
       "name": "GmailCtrl",
       "description": "Gmail の受信メール一覧の取得と下書き作成ができます。動作には gws CLI のインストールと設定が必要です（GWS_COMMAND で指定）。",
       "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-gmailctrl-v1.0.0/GmailCtrl.zip"
+    },
+    {
+      "name": "GetNewTechInfo",
+      "description": "技術記事の取得・管理（RSS/Atom フィード）。",
+      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-getnewtechinfo-v0.1.0/GetNewTechInfo.zip"
     }
   ]
 }
