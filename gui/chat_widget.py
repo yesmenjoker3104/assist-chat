@@ -305,6 +305,34 @@ class RoutingThread(QThread):
         self.route_llm.emit(self.prompt)
 
 
+class PluginActionThread(QThread):
+    """プラグインCLIをバックグラウンドで実行する。CLI からの LLM 依頼はこのスレッド内で処理する。"""
+
+    completed = pyqtSignal(dict)
+    cancelled = pyqtSignal()
+
+    def __init__(self, plugin_manager: PluginManager, plugin, action_def: PluginAction, command: dict, llm: OllamaEngine):
+        super().__init__()
+        self.plugin_manager = plugin_manager
+        self.plugin = plugin
+        self.action_def = action_def
+        self.command = command
+        self.llm = llm
+
+    def run(self):
+        result = self.plugin_manager.execute(
+            self.plugin,
+            self.action_def,
+            self.command,
+            llm_complete=self.llm.complete,
+            is_cancelled=self.isInterruptionRequested,
+        )
+        if self.isInterruptionRequested():
+            self.cancelled.emit()
+            return
+        self.completed.emit(result)
+
+
 class HistoryLoadThread(QThread):
     completed = pyqtSignal(list)
 
@@ -360,6 +388,7 @@ class ChatWidget(QWidget):
         self.thread = None
         self.display_thread = None
         self._display_pending = False
+        self.plugin_thread = None
         self.download_thread = None
         self.download_progress_bubble = None
         self.download_progress_lines = []
@@ -784,7 +813,7 @@ class ChatWidget(QWidget):
 
     def cancel_current_operation(self):
         cancelled = False
-        for thread in (self.routing_thread, self.thread, self.display_thread, self.download_thread, self.tech_news_search_thread):
+        for thread in (self.routing_thread, self.thread, self.display_thread, self.download_thread, self.tech_news_search_thread, self.plugin_thread):
             if thread and thread.isRunning():
                 thread.requestInterruption()
                 cancelled = True
@@ -800,6 +829,7 @@ class ChatWidget(QWidget):
         self._display_pending = False
         self.thread = None
         self.display_thread = None
+        self.plugin_thread = None
         self._add_bubble("assistant", "処理をキャンセルしました。")
         self.send_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -864,8 +894,33 @@ class ChatWidget(QWidget):
         if action_def.handler.startswith("builtin:"):
             self._call_builtin(action_def.handler[len("builtin:"):], command)
         else:
-            result = self.plugin_manager.execute(plugin, action_def, command)
-            self._render_plugin_result(result, action_def)
+            self._run_plugin_action_async(plugin, action_def, command)
+
+    def _run_plugin_action_async(self, plugin, action_def: PluginAction, command: dict):
+        """CLI 実行をバックグラウンドで行い、LLM 待ちで UI を止めないようにする。"""
+        self._display_pending = True
+        self._is_streaming = True
+        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False, focus=False)
+        self.thinking_bubble.setMinimumWidth(min(self._bubble_max_width(), 320))
+        self.thinking_frame = 0
+        self.thinking_timer.start()
+        self.plugin_thread = PluginActionThread(self.plugin_manager, plugin, action_def, command, self.llm)
+        self.plugin_thread.completed.connect(lambda result: self._on_plugin_completed(result, action_def))
+        self.plugin_thread.cancelled.connect(self._on_llm_cancelled)
+        self.cancel_button.setEnabled(True)
+        self.plugin_thread.start()
+
+    def _on_plugin_completed(self, result: dict, action_def: PluginAction):
+        self._is_streaming = False
+        self.thinking_timer.stop()
+        if self.thinking_bubble:
+            self._remove_bubble(self.thinking_bubble)
+            self.thinking_bubble = None
+        self._display_pending = False
+        self.plugin_thread = None
+        self._render_plugin_result(result, action_def)
+        self.send_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
 
     def _call_builtin(self, method_name: str, command: dict):
         """プラグインマニフェストの builtin:<name> ハンドラを既存Pythonメソッドへ委譲する。"""

@@ -3,9 +3,49 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+# CLI の実行上限（秒）。LLM 呼び出しに費やした時間は加算される。
+PLUGIN_TIMEOUT_SEC = 60
+# 1 回のアクション中に CLI が LLM を呼べる最大回数。
+MAX_LLM_REQUESTS = 5
+
+
+def _pump_lines(stream, out: queue.Queue) -> None:
+    """stdout を行単位で読み、キューへ流す。EOF では None を入れる。"""
+    try:
+        for line in stream:
+            out.put(line.rstrip("\r\n"))
+    finally:
+        out.put(None)
+
+
+def _parse_llm_request(line: str) -> dict | None:
+    """llm_request 制御行なら dict を返す。通常の出力行なら None。"""
+    stripped = line.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict) and data.get("type") == "llm_request":
+        return data
+    return None
+
+
+def _kill(process: subprocess.Popen) -> None:
+    try:
+        process.kill()
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 @dataclass
@@ -123,35 +163,115 @@ class PluginManager:
                 env[env_key] = str(value)
         return env
 
-    def _run(self, plugin: Plugin, cmd: list[str]) -> dict:
-        """Execute a CLI command for the given plugin and return parsed JSON."""
+    def _run(
+        self,
+        plugin: Plugin,
+        cmd: list[str],
+        llm_complete: Callable[[str], str] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """CLI を実行し、stdout の最終 JSON を返す。
+
+        stdout に `{"type": "llm_request", "id", "prompt"}` の行があれば LLM に問い合わせ、
+        `{"type": "llm_response", "id", "text"|"error"}` を stdin へ 1 行で返す。
+        それ以外の出力は従来どおり結果 JSON として扱う。
+        """
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
                 env=self._build_env(plugin),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            output = result.stdout.strip()
-            if not output:
-                return {"ok": False, "error": f"{plugin.name} から出力がありませんでした。"}
-            return json.loads(output)
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "タイムアウト"}
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"JSON解析エラー: {exc}"}
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
 
-    def execute(self, plugin: Plugin, action: PluginAction, params: dict) -> dict:
+        lines: queue.Queue = queue.Queue()
+        threading.Thread(target=_pump_lines, args=(process.stdout, lines), daemon=True).start()
+
+        body: list[str] = []
+        deadline = time.monotonic() + PLUGIN_TIMEOUT_SEC
+        llm_calls = 0
+        try:
+            while True:
+                if is_cancelled and is_cancelled():
+                    _kill(process)
+                    return {"ok": False, "error": "キャンセルされました。"}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _kill(process)
+                    return {"ok": False, "error": "タイムアウト"}
+                try:
+                    line = lines.get(timeout=min(remaining, 0.5))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                request = _parse_llm_request(line)
+                if request is None:
+                    body.append(line)
+                    continue
+
+                request_id = request.get("id")
+                if llm_complete is None:
+                    reply = {"type": "llm_response", "id": request_id, "error": "LLMは利用できません。"}
+                elif llm_calls >= MAX_LLM_REQUESTS:
+                    reply = {"type": "llm_response", "id": request_id, "error": "LLM呼び出しの上限に達しました。"}
+                else:
+                    llm_calls += 1
+                    started = time.monotonic()
+                    try:
+                        reply = {
+                            "type": "llm_response",
+                            "id": request_id,
+                            "text": llm_complete(str(request.get("prompt", ""))),
+                        }
+                    except Exception as exc:
+                        reply = {"type": "llm_response", "id": request_id, "error": str(exc)}
+                    # LLM の待ち時間は CLI のタイムアウトに含めない
+                    deadline += time.monotonic() - started
+                try:
+                    process.stdin.write(json.dumps(reply, ensure_ascii=True) + "\n")
+                    process.stdin.flush()
+                except (OSError, ValueError):
+                    # CLI が stdin を閉じている場合は、結果の受け取りだけを続ける
+                    pass
+
+            process.wait(timeout=max(deadline - time.monotonic(), 1))
+        except subprocess.TimeoutExpired:
+            _kill(process)
+            return {"ok": False, "error": "タイムアウト"}
+        finally:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+        output = "\n".join(body).strip()
+        if not output:
+            return {"ok": False, "error": f"{plugin.name} から出力がありませんでした。"}
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"JSON解析エラー: {exc}"}
+
+    def execute(
+        self,
+        plugin: Plugin,
+        action: PluginAction,
+        params: dict,
+        llm_complete: Callable[[str], str] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
         """Build CLI args from manifest + params, run the executable, return parsed JSON."""
         args = self._build_args(action, params)
         cmd = [str(plugin.executable)] + action.command_subcommands + args
-        return self._run(plugin, cmd)
+        return self._run(plugin, cmd, llm_complete, is_cancelled)
 
     def execute_raw(self, plugin: Plugin, subcommands: list[str], args: list[str]) -> dict:
         """Execute plugin CLI with explicit subcommands and args, bypassing manifest arg mapping."""

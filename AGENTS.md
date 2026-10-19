@@ -98,6 +98,19 @@
 - `ensure_ascii=True` で出力する（日本語はUnicodeエスケープ）
 - exit code: 0（成功）/ 非0（失敗）両方でJSONを出力すること
 
+### LLMコールバック（任意・`handler: "plugin"` のみ）
+
+CLIがLLMへ問い合わせて結果を加工したい場合は、stdoutへ次の制御行を出力する。
+
+- CLI → ホスト（stdout）: `{"type": "llm_request", "id": "<任意の文字列>", "prompt": "..."}`
+- ホスト → CLI（stdin、1行のJSON）: `{"type": "llm_response", "id": "<同じid>", "text": "..."}` または `{"type": "llm_response", "id": "<同じid>", "error": "..."}`
+
+- 制御行以外のstdout行は従来どおり結果として扱い、最後にJSONとして解析する。制御行を出さないCLIは従来と同じ動作。
+- 1アクションあたりのLLM呼び出しは最大5回。超過時は `error` が返る。
+- CLIの実行タイムアウト（60秒）にはLLMの待ち時間を含めない。
+- LLM接続が無い場合やLLMがエラーを返した場合も `llm_response` が返るので、CLIはエラーとして処理すること。
+- プラグイン実行はバックグラウンドスレッドで行われ、LLM待ちの間もUIは操作可能。キャンセルでCLIは強制終了される。
+
 ### handler の種類
 
 | 値 | 動作 |
@@ -105,7 +118,7 @@
 | `"plugin"` | PluginManagerがCLIを直接実行し、stdout JSONを `display` 設定で表示 |
 | `"builtin:<method>"` | 既存のPythonメソッド（`_call_builtin`マップ）へ委譲。CLIを呼ばない |
 
-`"progress"` 表示（ダウンロード進捗など）や複数回のCLI呼び出しが必要な複雑な処理は `handler: "builtin:..."` として実装する。
+`"progress"` 表示（ダウンロード進捗など）や、Python側での複雑な処理が必要な場合は `handler: "builtin:..."` として実装する。LLMを複数回使う処理は、CLIからの「LLMコールバック」で実装できる（`handler: "plugin"` のまま）。
 
 ### display 設定と表示方式
 

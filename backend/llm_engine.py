@@ -102,3 +102,13 @@ class OllamaEngine:
                         break
         except requests.RequestException as exc:
             yield f"[Ollama接続エラー: {exc}]"
+
+    def complete(self, prompt: str) -> str:
+        """プラグインからの依頼用に、ストリーミングせず全文を返す。失敗時は例外を送出する。"""
+        response = requests.post(
+            f"{self.base_url}/api/generate",
+            json={"model": self.model, "prompt": prompt, "stream": False},
+            timeout=(10, 600),
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
