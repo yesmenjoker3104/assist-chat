@@ -7,6 +7,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QWIDGETSIZE_MAX,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -403,6 +404,10 @@ class ChatWidget(QWidget):
         self.thinking_timer.setInterval(350)
         self.thinking_timer.timeout.connect(self._animate_thinking)
         self._all_bubbles: list[QLabel] = []
+        self._bubble_reflow_timer = QTimer(self)
+        self._bubble_reflow_timer.setSingleShot(True)
+        self._bubble_reflow_timer.setInterval(120)
+        self._bubble_reflow_timer.timeout.connect(self._reflow_bubbles)
         self.routing_thread = None
         self.tech_news_fetch_thread = None
         self.tech_news_search_thread = None
@@ -458,6 +463,7 @@ class ChatWidget(QWidget):
         self.message_layout.setSpacing(6)
         self.scroll_area.setWidget(self.message_panel)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_history_scroll)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(lambda _value: self._update_bubble_visibility())
         layout.addWidget(self.scroll_area, 1)
         self.thinking_bubble = None
         self.input = QTextEdit()
@@ -545,6 +551,12 @@ class ChatWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # ドラッグ中は毎ピクセルの再計算を避け、サイズが落ち着いてから一度だけ反映する。
+        self._bubble_reflow_timer.start()
+        self._position_prompt_suggestions()
+        self._update_bubble_visibility()
+
+    def _reflow_bubbles(self):
         max_width = self._bubble_max_width()
         for bubble in list(self._all_bubbles):
             if sip.isdeleted(bubble):
@@ -554,7 +566,46 @@ class ChatWidget(QWidget):
                 content = self._bubble_texts[bubble][1]
                 if "\n" not in content:
                     bubble.setMinimumWidth(min(max_width, self._bubble_content_width(bubble, content)))
-        self._position_prompt_suggestions()
+        self._refresh_hidden_row_heights()
+        self._update_bubble_visibility()
+
+    def _update_bubble_visibility(self):
+        # 表示範囲の上下1画面分の外にあるバブルは非表示にし、行の高さだけ残して
+        # スクロール範囲を変えずに、画面外のレイアウト計算を省く。
+        if not self._all_bubbles:
+            return
+        bar = self.scroll_area.verticalScrollBar()
+        viewport_height = self.scroll_area.viewport().height()
+        self.message_layout.activate()
+        top = bar.value() - viewport_height
+        bottom = bar.value() + viewport_height * 2
+        for bubble in self._all_bubbles:
+            if sip.isdeleted(bubble):
+                continue
+            row = bubble.parentWidget()
+            if row is None or sip.isdeleted(row):
+                continue
+            on_screen = row.y() + row.height() >= top and row.y() <= bottom
+            if on_screen:
+                if bubble.isHidden():
+                    row.setMinimumHeight(0)
+                    row.setMaximumHeight(QWIDGETSIZE_MAX)
+                    bubble.show()
+            elif not bubble.isHidden():
+                row.setFixedHeight(row.height())
+                bubble.hide()
+
+    def _refresh_hidden_row_heights(self):
+        max_width = self._bubble_max_width()
+        for bubble in self._all_bubbles:
+            if sip.isdeleted(bubble) or not bubble.isHidden():
+                continue
+            row = bubble.parentWidget()
+            if row is None or sip.isdeleted(row):
+                continue
+            height = bubble.heightForWidth(max_width)
+            if height > 0:
+                row.setFixedHeight(height)
 
     @staticmethod
     def _bubble_content_width(bubble: QLabel, text: str) -> int:
