@@ -22,7 +22,10 @@
 | `main.py` | アプリケーション起動 |
 | `backend/llm_engine.py` | Ollama REST APIラッパー |
 | `backend/ollama_installer.py` | 未配置時のOllama公式ZIPダウンロード・展開、サーバー起動 |
-| `backend/plugin_manager.py` | プラグイン発見・ルーティング・CLI実行 |
+| `backend/plugin_manager.py` | プラグイン発見・ルーティング・CLI実行・`reload()` |
+| `backend/plugin_installer.py` | プラグインZIPのURL取得・検証・展開・上書き導入、おすすめカタログ取得 |
+| `gui/plugin_install_dialog.py` | おすすめプラグイン一覧ダイアログ |
+| `plugin_catalog.json` | おすすめプラグイン一覧（`https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json` で取得）。ZIPのURLは公開されたものだけを載せる |
 | `config.py` | 設定とプロジェクト内データパス |
 | `gui/main_window.py` | メインウィンドウとOllama起動管理 |
 | `gui/chat_widget.py` | チャットUI、LLM解釈、操作確認フロー |
@@ -126,7 +129,7 @@
 最初に最小範囲で次を実行する。
 
 ```powershell
-python -m py_compile config.py backend\llm_engine.py backend\plugin_manager.py gui\chat_widget.py gui\main_window.py main.py
+python -m py_compile config.py backend\llm_engine.py backend\plugin_manager.py backend\plugin_installer.py gui\chat_widget.py gui\main_window.py gui\plugin_install_dialog.py main.py
 ```
 
 PowerShellを変更した場合は、実行前に構文解析する。

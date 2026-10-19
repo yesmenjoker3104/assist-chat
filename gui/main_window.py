@@ -7,11 +7,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -22,6 +23,14 @@ from PyQt6.QtWidgets import (
 
 from backend.llm_engine import OllamaEngine
 from backend.ollama_installer import install_ollama, launch_ollama_server
+from backend.plugin_installer import (
+    PluginExistsError,
+    PluginInstallError,
+    PluginPackage,
+    fetch_catalog,
+    fetch_package,
+    install_package,
+)
 from backend.plugin_manager import PluginManager
 from backend.tech_news import TechNewsClient
 from backend.updater import (
@@ -33,6 +42,7 @@ from backend.updater import (
 from backend.video_downloader import VideoDownloader
 from config import BASE_DIR, OLLAMA_EXE, load_settings
 from gui.chat_widget import ChatWidget
+from gui.plugin_install_dialog import RecommendedPluginsDialog
 from gui.settings_dialog import SettingsDialog
 from version import __version__
 
@@ -53,6 +63,21 @@ class UpdateWorker(QThread):
                 Path(tempfile.mkdtemp(prefix="assist-chat-download-")) / "AssistChat.exe",
             )
             self.update_ready.emit(release, str(staged_exe))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class CallWorker(QThread):
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, func, parent=None):
+        super().__init__(parent)
+        self._func = func
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self._func())
         except Exception as error:
             self.failed.emit(str(error))
 
@@ -139,6 +164,13 @@ class MainWindow(QMainWindow):
         plugin_list_action = QAction("プラグイン一覧", self)
         plugin_list_action.triggered.connect(self.show_plugin_list)
         plugin_menu.addAction(plugin_list_action)
+        plugin_menu.addSeparator()
+        recommended_action = QAction("おすすめプラグインから導入...", self)
+        recommended_action.triggered.connect(self.install_recommended_plugin)
+        plugin_menu.addAction(recommended_action)
+        plugin_url_action = QAction("URLからプラグインを導入...", self)
+        plugin_url_action.triggered.connect(self.install_plugin_from_url)
+        plugin_menu.addAction(plugin_url_action)
 
         help_menu = self.menuBar().addMenu("ヘルプ")
         version_action = QAction("バージョン情報", self)
@@ -148,6 +180,7 @@ class MainWindow(QMainWindow):
         self.check_update_action.triggered.connect(self.check_for_updates)
         help_menu.addAction(self.check_update_action)
         self._update_worker: UpdateWorker | None = None
+        self._plugin_worker: CallWorker | None = None
         self._setup_worker: OllamaSetupWorker | None = None
         self._setup_progress: QProgressDialog | None = None
         self.chat = ChatWidget(
@@ -206,6 +239,88 @@ class MainWindow(QMainWindow):
                     self._notified_event_ids.add(eid)
             except (ValueError, TypeError):
                 continue
+
+    def install_plugin_from_url(self):
+        url, ok = QInputDialog.getText(
+            self, "URLからプラグインを導入", "プラグインZIPのURL（https://で始まるもの）:"
+        )
+        if ok and url.strip():
+            self._start_plugin_download(url.strip())
+
+    def install_recommended_plugin(self):
+        self._run_plugin_task(
+            fetch_catalog,
+            "おすすめプラグインを取得しています...",
+            self._on_catalog_loaded,
+        )
+
+    def _on_catalog_loaded(self, entries):
+        dlg = RecommendedPluginsDialog(entries, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_url:
+            self._start_plugin_download(dlg.selected_url)
+
+    def _start_plugin_download(self, url: str):
+        answer = QMessageBox.question(
+            self,
+            "プラグインの導入",
+            "次の提供元からプラグインをダウンロードして導入します。\n\n"
+            f"{url}\n\n"
+            "プラグインは実行ファイルとして、あなたのアカウントの権限で動作します。\n"
+            "信頼できる提供元のものだけを導入してください。\n\n続けますか？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_plugin_task(
+            lambda: fetch_package(url),
+            "プラグインをダウンロードしています...",
+            self._on_package_ready,
+        )
+
+    def _on_package_ready(self, package: PluginPackage):
+        runtime_dir = self.plugin_manager.runtime_dir
+        already_installed = (runtime_dir / package.name).exists()
+        try:
+            if already_installed:
+                answer = QMessageBox.question(
+                    self,
+                    "上書きの確認",
+                    f"{package.name} は既にインストールされています。\n"
+                    f"v{package.version} で上書きしますか？\n\n"
+                    "プログラムのファイルは置き換えますが、データファイル（DBなど）は残します。",
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            install_package(package, runtime_dir, replace=already_installed)
+        except PluginExistsError as error:
+            QMessageBox.warning(self, "プラグイン", str(error))
+            return
+        except (PluginInstallError, OSError) as error:
+            QMessageBox.warning(self, "プラグイン", f"インストールに失敗しました: {error}")
+            return
+        finally:
+            package.cleanup()
+        self.plugin_manager.reload()
+        QMessageBox.information(
+            self,
+            "プラグイン",
+            f"{package.name} v{package.version} を導入しました。\n"
+            "チャットからすぐに利用できます。",
+        )
+
+    def _run_plugin_task(self, func, message: str, on_done):
+        if self._plugin_worker is not None and self._plugin_worker.isRunning():
+            QMessageBox.information(self, "プラグイン", "別のプラグイン処理が実行中です。完了後にもう一度お試しください。")
+            return
+        progress = QProgressDialog(message, None, 0, 0, self)
+        progress.setWindowTitle("プラグイン")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        worker = CallWorker(func, self)
+        self._plugin_worker = worker
+        worker.done.connect(lambda result: (progress.close(), on_done(result)))
+        worker.failed.connect(lambda msg: (progress.close(), QMessageBox.warning(self, "プラグイン", msg)))
+        worker.start()
 
     def show_plugin_list(self):
         import json as _json

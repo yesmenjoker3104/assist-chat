@@ -78,6 +78,11 @@ class PluginManager:
         self.settings: dict = settings or {}
         self._load()
 
+    def reload(self) -> None:
+        self.plugins = []
+        self._action_map = {}
+        self._load()
+
     def _load(self) -> None:
         if not self.runtime_dir.exists():
             return
