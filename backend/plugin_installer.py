@@ -18,6 +18,7 @@ MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 _USER_AGENT = "AssistChat-PluginInstaller"
 _NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+INSTALL_MANIFEST = ".install_manifest.json"
 
 
 class PluginInstallError(Exception):
@@ -33,6 +34,7 @@ class CatalogEntry:
     name: str
     description: str
     url: str
+    version: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class PluginPackage:
     source_url: str
     source_dir: Path
     work_dir: Path
+    preserve: tuple[str, ...] = ()
 
     def cleanup(self) -> None:
         shutil.rmtree(self.work_dir, ignore_errors=True)
@@ -69,7 +72,14 @@ def fetch_catalog(url: str = CATALOG_URL, timeout: float = 10.0) -> list[Catalog
         entry_url = str(item.get("url", ""))
         if not _NAME_PATTERN.fullmatch(name) or urlparse(entry_url).scheme != "https":
             continue
-        entries.append(CatalogEntry(name, str(item.get("description", "")), entry_url))
+        entries.append(
+            CatalogEntry(
+                name=name,
+                description=str(item.get("description", "")),
+                url=entry_url,
+                version=str(item.get("version", "")),
+            )
+        )
     return entries
 
 
@@ -138,6 +148,7 @@ def inspect_archive(archive: Path, source_url: str = "") -> PluginPackage:
             source_url=source_url,
             source_dir=source_dir,
             work_dir=work_dir,
+            preserve=tuple(plugin.preserve),
         )
     except PluginInstallError:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -158,14 +169,83 @@ def fetch_package(url: str, timeout: float = 60.0) -> PluginPackage:
         shutil.rmtree(download_dir, ignore_errors=True)
 
 
+def _package_files(source_dir: Path) -> set[str]:
+    return {
+        path.relative_to(source_dir).as_posix()
+        for path in source_dir.rglob("*")
+        if path.is_file() and path.name != INSTALL_MANIFEST
+    }
+
+
+def _is_preserved(relative: str, preserve: tuple[str, ...] | list[str]) -> bool:
+    for pattern in preserve:
+        prefix = pattern.replace("\\", "/").strip("/")
+        if prefix and (relative == prefix or relative.startswith(prefix + "/")):
+            return True
+    return False
+
+
+def _read_install_manifest(target: Path) -> set[str]:
+    """Return the files a previous install placed in target.
+
+    Entries that resolve outside target are ignored so a tampered manifest cannot delete other files.
+    """
+    manifest = target / INSTALL_MANIFEST
+    if not manifest.is_file():
+        return set()
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    root = target.resolve()
+    files: set[str] = set()
+    for relative in data.get("files", []):
+        if not isinstance(relative, str):
+            continue
+        resolved = (target / relative).resolve()
+        if resolved != root and resolved.is_relative_to(root):
+            files.add(resolved.relative_to(root).as_posix())
+    return files
+
+
+def _remove_installed_file(target: Path, relative: str) -> None:
+    path = target / relative
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    parent = path.parent
+    while parent != target and parent.is_relative_to(target) and not any(parent.iterdir()):
+        parent.rmdir()
+        parent = parent.parent
+
+
 def install_package(package: PluginPackage, plugin_root: Path, replace: bool) -> Path:
     """Copy the package into plugin_root/<name>.
 
-    With replace=True, files are overwritten but existing data files are kept.
+    With replace=True:
+    - files shipped by the package are overwritten, except preserved paths that already exist
+    - files installed by the previous version (recorded in INSTALL_MANIFEST) that the new
+      package no longer ships are deleted, unless preserved
+    - files that were never installed by the package (e.g. runtime data) are left untouched
     """
     target = plugin_root / package.name
     if target.exists() and not replace:
         raise PluginExistsError(f"{package.name} は既に存在します。")
     plugin_root.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(package.source_dir, target, dirs_exist_ok=True)
+    new_files = _package_files(package.source_dir)
+    if target.exists():
+        for relative in sorted(_read_install_manifest(target) - new_files):
+            if not _is_preserved(relative, package.preserve):
+                _remove_installed_file(target, relative)
+    for relative in sorted(new_files):
+        destination = target / relative
+        if destination.exists() and _is_preserved(relative, package.preserve):
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(package.source_dir / relative, destination)
+    manifest = {"version": package.version, "files": sorted(new_files)}
+    (target / INSTALL_MANIFEST).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return target

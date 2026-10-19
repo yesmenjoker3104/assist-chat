@@ -255,7 +255,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_catalog_loaded(self, entries):
-        dlg = RecommendedPluginsDialog(entries, self)
+        installed_versions = {p.name: p.version for p in self.plugin_manager.plugins}
+        dlg = RecommendedPluginsDialog(entries, installed_versions, self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_url:
             self._start_plugin_download(dlg.selected_url)
 

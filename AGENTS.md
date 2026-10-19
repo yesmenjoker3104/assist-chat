@@ -25,7 +25,7 @@
 | `backend/plugin_manager.py` | プラグイン発見・ルーティング・CLI実行・`reload()` |
 | `backend/plugin_installer.py` | プラグインZIPのURL取得・検証・展開・上書き導入、おすすめカタログ取得 |
 | `gui/plugin_install_dialog.py` | おすすめプラグイン一覧ダイアログ |
-| `plugin_catalog.json` | おすすめプラグイン一覧（`https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json` で取得）。ZIPのURLは公開されたものだけを載せる |
+| `plugin_catalog.json` | おすすめプラグイン一覧（`https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json` で取得）。各項目に `name`・`version`（導入済みとの比較に使用）・`description`・`url` を書く。ZIPのURLは公開されたものだけを載せ、`version` はZIP内 `plugin.json` の版と一致させる |
 | `config.py` | 設定とプロジェクト内データパス |
 | `gui/main_window.py` | メインウィンドウとOllama起動管理 |
 | `gui/chat_widget.py` | チャットUI、LLM解釈、操作確認フロー |
@@ -64,6 +64,7 @@
   "version": "1.0.0",
   "description": "モジュールの説明",
   "executable": "ModuleCli.exe",         // plugin/<ModuleName>/ 以下の相対パス
+  "preserve": ["config.json"],           // 省略可。更新時に上書き・削除しないファイル/フォルダ（相対パス）
   "actions": [
     {
       "action": "action_name",           // LLMが返すJSONの "action" 値

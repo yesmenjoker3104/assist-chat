@@ -75,6 +75,8 @@ class Plugin:
     actions: list[PluginAction] = field(default_factory=list)
     # {ENV_VAR_NAME: settings_key} — resolved from PluginManager settings at execute time
     env_vars: dict[str, str] = field(default_factory=dict)
+    # Relative paths or folder names that updates must neither overwrite nor delete
+    preserve: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, plugin_dir: Path) -> "Plugin":
@@ -105,6 +107,7 @@ class Plugin:
             executable=executable,
             actions=actions,
             env_vars=data.get("env_vars", {}),
+            preserve=[str(p) for p in data.get("preserve", [])],
         )
 
 
