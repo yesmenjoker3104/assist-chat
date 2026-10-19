@@ -18,6 +18,7 @@ GITHUB_REPO = "yesmenjoker3104/assist-chat"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASE_ASSET_NAME = "AssistChat.exe"
 _USER_AGENT = "AssistChat-Updater"
+_PYINSTALLER_ENV_PREFIXES = ("_PYI", "_MEI")
 
 _APPLY_UPDATE_SCRIPT = r"""
 param(
@@ -140,6 +141,11 @@ def download_release(release: ReleaseInfo, destination: Path) -> Path:
     return destination
 
 
+def _child_environment() -> dict[str, str]:
+    # 親のPyInstaller用変数を引き継ぐと、新しいexeが終了済みの一時フォルダを参照して起動に失敗するため除外する。
+    return {key: value for key, value in os.environ.items() if not key.startswith(_PYINSTALLER_ENV_PREFIXES)}
+
+
 def start_update_process(staged_exe: Path, current_exe: Path) -> None:
     if sys.platform != "win32":
         raise RuntimeError("In-app updates are supported on Windows only")
@@ -161,6 +167,7 @@ def start_update_process(staged_exe: Path, current_exe: Path) -> None:
             str(os.getpid()),
         ],
         cwd=tempfile.gettempdir(),
+        env=_child_environment(),
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
         close_fds=True,
     )

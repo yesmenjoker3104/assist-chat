@@ -8,7 +8,14 @@ from PyQt6.QtWidgets import (
 from config import load_history_limits, load_settings, save_settings
 
 
+# 新しいおすすめモデルを先頭に置く。サイズは Ollama ライブラリ掲載値の目安
 MODEL_CATALOG = [
+    ("Gemma4 E4B (6.6-9.5 GB)", "gemma4:e4b"),
+    ("Gemma4 12B (7.7-8.0 GB)", "gemma4:12b"),
+    ("Gemma4 26B (16-19 GB)", "gemma4:26b"),
+    ("Qwen3.8 27B (18 GB)", "qwen3.8:27b"),
+    ("Nemotron 3.5 Bolt (25 GB)", "nemotron-3.5-bolt"),
+    ("Bonsai 2 9B (3.2 GB)", "bonsai-2:9b"),
     ("Qwen2.5 0.5B (397 MB)", "qwen2.5:0.5b"),
     ("Qwen2.5 1.5B (986 MB)", "qwen2.5:1.5b"),
     ("Qwen2.5 3B (1.9 GB)", "qwen2.5:3b"),

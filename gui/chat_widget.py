@@ -538,6 +538,10 @@ class ChatWidget(QWidget):
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
                 self._toggle_history_search()
                 return True
+            if self._prompt_suggestions_visible and event.key() == Qt.Key.Key_Escape:
+                self.prompt_suggestions.hide()
+                self._prompt_suggestions_visible = False
+                return True
             if event.key() == Qt.Key.Key_Up and self._cursor_is_at_start():
                 if self._navigate_prompt_history(1):
                     return True
@@ -1103,7 +1107,10 @@ class ChatWidget(QWidget):
                 + "".join(rows) + "</table>"
             )
         self._add_bubble("assistant", f'<b>技術記事（{len(articles)}件）</b>' + "".join(sections), is_html=True)
-        self.tech_news.mark_read([article["id"] for article in articles if "id" in article])
+        try:
+            self.tech_news.mark_read([article["id"] for article in articles if "id" in article])
+        except TechNewsError:
+            pass
 
     def _search_tech_news(self, command: dict):
         if not self.tech_news:
