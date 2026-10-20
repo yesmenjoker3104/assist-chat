@@ -39,7 +39,6 @@ from backend.updater import (
     fetch_latest_release,
     start_update_process,
 )
-from backend.video_downloader import VideoDownloader
 from config import BASE_DIR, OLLAMA_EXE, load_settings
 from gui.chat_widget import ChatWidget
 from gui.plugin_install_dialog import RecommendedPluginsDialog
@@ -142,12 +141,6 @@ class MainWindow(QMainWindow):
             settings["tech_news_dir"],
             settings.get("tech_news_cli_exe"),
         )
-        self.downloader = VideoDownloader(
-            settings["youtube_downloader_dir"],
-            settings.get("youtube_download_output_dir"),
-            cli_exe_path=settings.get("youtube_downloader_cli_exe"),
-            max_parallel_downloads=settings.get("youtube_download_parallel", 3),
-        )
         self.plugin_manager = PluginManager(BASE_DIR, settings)
         self.ollama_process = None
         self.ollama_pid = None
@@ -185,7 +178,6 @@ class MainWindow(QMainWindow):
         self._setup_progress: QProgressDialog | None = None
         self.chat = ChatWidget(
             self.llm,
-            self.downloader,
             self.tech_news,
             plugin_manager=self.plugin_manager,
             tech_news_auto_fetch_enabled=settings.get("tech_news_auto_fetch_enabled", True),
@@ -396,10 +388,6 @@ class MainWindow(QMainWindow):
         self.llm.model = settings["model"]
         self._set_ollama_status("接続済み")
         self.plugin_manager.settings = settings
-        self.downloader.output_dir = (
-            Path(settings["youtube_download_output_dir"])
-            if settings.get("youtube_download_output_dir") else Path.home() / "Downloads"
-        )
         self.chat.tech_news_timer.setInterval(settings["tech_news_auto_fetch_minutes"] * 60 * 1000)
         self.chat.apply_history_settings(settings)
         if settings["tech_news_auto_fetch_enabled"]:

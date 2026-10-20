@@ -26,8 +26,8 @@ def _pump_lines(stream, out: queue.Queue) -> None:
         out.put(None)
 
 
-def _parse_llm_request(line: str) -> dict | None:
-    """llm_request 制御行なら dict を返す。通常の出力行なら None。"""
+def _parse_control_line(line: str) -> dict | None:
+    """llm_request / progress 制御行なら dict を返す。通常の出力行なら None。"""
     stripped = line.strip()
     if not stripped.startswith("{"):
         return None
@@ -35,7 +35,7 @@ def _parse_llm_request(line: str) -> dict | None:
         data = json.loads(stripped)
     except json.JSONDecodeError:
         return None
-    if isinstance(data, dict) and data.get("type") == "llm_request":
+    if isinstance(data, dict) and data.get("type") in ("llm_request", "progress"):
         return data
     return None
 
@@ -172,11 +172,14 @@ class PluginManager:
         cmd: list[str],
         llm_complete: Callable[[str], str] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> dict:
         """CLI を実行し、stdout の最終 JSON を返す。
 
         stdout に `{"type": "llm_request", "id", "prompt"}` の行があれば LLM に問い合わせ、
         `{"type": "llm_response", "id", "text"|"error"}` を stdin へ 1 行で返す。
+        stdout に `{"type": "progress", "id", "text"}` の行があれば progress_callback を呼び、
+        `{"type": "progress_ack", "id"}` を stdin へ返す。
         それ以外の出力は従来どおり結果 JSON として扱う。
         """
         try:
@@ -215,12 +218,24 @@ class PluginManager:
                     continue
                 if line is None:
                     break
-                request = _parse_llm_request(line)
-                if request is None:
+                ctrl = _parse_control_line(line)
+                if ctrl is None:
                     body.append(line)
                     continue
 
-                request_id = request.get("id")
+                if ctrl.get("type") == "progress":
+                    deadline = max(deadline, time.monotonic() + PLUGIN_TIMEOUT_SEC)
+                    if progress_callback:
+                        progress_callback(ctrl.get("id", ""), ctrl.get("text", ""))
+                    ack = {"type": "progress_ack", "id": ctrl.get("id", "")}
+                    try:
+                        process.stdin.write(json.dumps(ack, ensure_ascii=True) + "\n")
+                        process.stdin.flush()
+                    except (OSError, ValueError):
+                        pass
+                    continue
+
+                request_id = ctrl.get("id")
                 if llm_complete is None:
                     reply = {"type": "llm_response", "id": request_id, "error": "LLMは利用できません。"}
                 elif llm_calls >= MAX_LLM_REQUESTS:
@@ -232,7 +247,7 @@ class PluginManager:
                         reply = {
                             "type": "llm_response",
                             "id": request_id,
-                            "text": llm_complete(str(request.get("prompt", ""))),
+                            "text": llm_complete(str(ctrl.get("prompt", ""))),
                         }
                     except Exception as exc:
                         reply = {"type": "llm_response", "id": request_id, "error": str(exc)}
@@ -270,11 +285,12 @@ class PluginManager:
         params: dict,
         llm_complete: Callable[[str], str] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> dict:
         """Build CLI args from manifest + params, run the executable, return parsed JSON."""
         args = self._build_args(action, params)
         cmd = [str(plugin.executable)] + action.command_subcommands + args
-        return self._run(plugin, cmd, llm_complete, is_cancelled)
+        return self._run(plugin, cmd, llm_complete, is_cancelled, progress_callback)
 
     def execute_raw(self, plugin: Plugin, subcommands: list[str], args: list[str]) -> dict:
         """Execute plugin CLI with explicit subcommands and args, bypassing manifest arg mapping."""
@@ -316,4 +332,16 @@ class PluginManager:
             elif t == "bool_flag":
                 if params.get(arg.get("param", ""), False):
                     args.append(arg["flag"])
+            elif t == "multi_positional":
+                values = params.get(arg.get("param", ""), []) or []
+                if isinstance(values, list):
+                    args.extend(str(v) for v in values if str(v).strip())
+                elif values:
+                    args.append(str(values))
+            elif t == "multi_flag":
+                values = params.get(arg.get("param", ""), []) or []
+                if arg.get("omit_if_null") and not values:
+                    continue
+                if isinstance(values, list) and values:
+                    args.extend([arg["flag"]] + [str(v) for v in values])
         return args

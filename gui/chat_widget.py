@@ -25,7 +25,6 @@ from backend.chat_history import ChatHistory
 from backend.llm_engine import OllamaEngine
 from backend.plugin_manager import PluginAction, PluginManager
 from backend.tech_news import TechNewsClient, TechNewsError
-from backend.video_downloader import VideoDownloadCancelled, VideoDownloadError, VideoDownloader
 from config import HISTORY_DATABASE_FILE, load_history_limits, load_settings
 
 _URL_RE = re.compile(r'(https?://[^\s<>"]+)')
@@ -47,41 +46,6 @@ def _extract_urls(text: str, rich_text: str = "") -> list[str]:
         for item in re.findall(r'href=["\'](https?://[^"\']+)', rich_text, re.IGNORECASE)
     )
     return list(dict.fromkeys(urls))
-
-
-def _extract_output_dir(text: str) -> str | None:
-    match = re.search(
-        r"(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\r\n]+?)(?=に(?:ダウンロード|保存|取得)|\s+https?://|$)",
-        text,
-    )
-    if not match:
-        return None
-    return match.group(1).strip().rstrip("に。.,!?") or None
-
-
-def _is_audio_only_request(text: str) -> bool:
-    if re.search(r"動画(?:も|と音源)?(?:を)?(?:ほしい|ください|お願い|ダウンロード)", text) or "mp4" in text.lower():
-        return False
-    return any(kw in text for kw in ("音源", "音声", "音だけ", "mp3"))
-
-
-def _normalize_stems(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    allowed = {"vocals", "drums", "bass", "guitar", "piano", "other"}
-    return list(dict.fromkeys(str(item).lower() for item in value if str(item).lower() in allowed))
-
-
-def _extract_stems(text: str) -> list[str]:
-    stem_names = {
-        "ボーカル": "vocals", "ヴォーカル": "vocals", "歌": "vocals",
-        "ドラム": "drums", "ドラムス": "drums",
-        "ベース": "bass", "ギター": "guitar", "ピアノ": "piano",
-        "その他": "other",
-    }
-    stems = [stem for name, stem in stem_names.items() if name in text]
-    english_matches = re.findall(r"(?i)\b(vocals|drums|bass|guitar|piano|other)\b", text)
-    return _normalize_stems(stems + english_matches)
 
 
 # カレンダー等の固定アクションは各プラグインの plugin.json から動的挿入される
@@ -118,49 +82,6 @@ class LlmThread(QThread):
             return
         self.completed.emit("".join(chunks))
 
-
-class VideoDownloadThread(QThread):
-    completed = pyqtSignal(str)
-    failed = pyqtSignal(str)
-    progress = pyqtSignal(str)
-    cancelled = pyqtSignal()
-
-    def __init__(
-        self,
-        downloader: VideoDownloader,
-        urls: list[str],
-        audio_only: bool = True,
-        output_dir: str | None = None,
-        stems: list[str] | None = None,
-        allow_playlist: bool = False,
-    ):
-        super().__init__()
-        self.downloader = downloader
-        self.urls = urls
-        self.audio_only = audio_only
-        self.output_dir = output_dir
-        self.stems = stems or []
-        self.allow_playlist = allow_playlist
-        from pathlib import Path
-        self.effective_output_dir = str(Path(output_dir) if output_dir else Path.home() / "Downloads")
-
-    def run(self):
-        try:
-            self.completed.emit(
-                self.downloader.download_many(
-                    self.urls,
-                    self.audio_only,
-                    progress_callback=self.progress.emit,
-                    output_dir=self.output_dir,
-                    stems=self.stems,
-                    cancel_requested=self.isInterruptionRequested,
-                    allow_playlist=self.allow_playlist,
-                )
-            )
-        except VideoDownloadCancelled:
-            self.cancelled.emit()
-        except VideoDownloadError as exc:
-            self.failed.emit(str(exc))
 
 
 class TechNewsFetchThread(QThread):
@@ -270,7 +191,6 @@ class RoutingThread(QThread):
     メインスレッドへのブロッキングI/Oを防ぐため、軽い入力判定だけをここで行う。"""
 
     route_llm = pyqtSignal(str)
-    route_download = pyqtSignal(dict)
     route_history_clear = pyqtSignal()
 
     def __init__(self, text: str, rich_text: str, prompt: str):
@@ -288,21 +208,6 @@ class RoutingThread(QThread):
             return
 
         direct_urls = _extract_urls(text, rich_text)
-        direct_video_urls = [
-            url for url in direct_urls
-            if re.match(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/", url, re.IGNORECASE)
-        ]
-        if direct_video_urls:
-            playlist = any("/playlist" in url or "list=" in url for url in direct_video_urls)
-            self.route_download.emit({
-                "urls": direct_video_urls,
-                "audio_only": _is_audio_only_request(text),
-                "output_dir": _extract_output_dir(text),
-                "stems": _extract_stems(text),
-                "playlist": playlist,
-            })
-            return
-
         link_urls = [url for url in direct_urls if url not in text]
         prompt = self.prompt
         if link_urls:
@@ -318,6 +223,7 @@ class PluginActionThread(QThread):
 
     completed = pyqtSignal(dict)
     cancelled = pyqtSignal()
+    progress = pyqtSignal(str, str)  # (progress_id, text)
 
     def __init__(self, plugin_manager: PluginManager, plugin, action_def: PluginAction, command: dict, llm: OllamaEngine):
         super().__init__()
@@ -328,12 +234,16 @@ class PluginActionThread(QThread):
         self.llm = llm
 
     def run(self):
+        def _progress_cb(pid: str, text: str) -> None:
+            self.progress.emit(pid, text)
+
         result = self.plugin_manager.execute(
             self.plugin,
             self.action_def,
             self.command,
             llm_complete=self.llm.complete,
             is_cancelled=self.isInterruptionRequested,
+            progress_callback=_progress_cb,
         )
         if self.isInterruptionRequested():
             self.cancelled.emit()
@@ -358,7 +268,6 @@ class ChatWidget(QWidget):
     def __init__(
         self,
         llm: OllamaEngine,
-        downloader: VideoDownloader | None = None,
         tech_news: TechNewsClient | None = None,
         plugin_manager: PluginManager | None = None,
         tech_news_auto_fetch_enabled: bool = True,
@@ -366,7 +275,6 @@ class ChatWidget(QWidget):
     ):
         super().__init__()
         self.llm = llm
-        self.downloader = downloader
         self.tech_news = tech_news
         self.plugin_manager = plugin_manager
         settings = load_settings()
@@ -397,9 +305,8 @@ class ChatWidget(QWidget):
         self.display_thread = None
         self._display_pending = False
         self.plugin_thread = None
-        self.download_thread = None
-        self.download_progress_bubble = None
-        self.download_progress_lines = []
+        self.plugin_progress_bubble = None
+        self.plugin_progress_lines: list[str] = []
         self.last_user_text = ""
         self._pending_focus_widget = None
         self._focus_scheduled = False
@@ -850,7 +757,6 @@ class ChatWidget(QWidget):
         ) + self._history_prompt(text)
         self.routing_thread = RoutingThread(text, rich_text, prompt)
         self.routing_thread.route_llm.connect(self._on_route_llm)
-        self.routing_thread.route_download.connect(self._download_video)
         self.routing_thread.route_history_clear.connect(lambda: self._clear_history(confirm=True))
         self.routing_thread.start()
 
@@ -871,7 +777,7 @@ class ChatWidget(QWidget):
 
     def cancel_current_operation(self):
         cancelled = False
-        for thread in (self.routing_thread, self.thread, self.display_thread, self.download_thread, self.tech_news_search_thread, self.plugin_thread):
+        for thread in (self.routing_thread, self.thread, self.display_thread, self.tech_news_search_thread, self.plugin_thread):
             if thread and thread.isRunning():
                 thread.requestInterruption()
                 cancelled = True
@@ -883,6 +789,11 @@ class ChatWidget(QWidget):
         self.thinking_timer.stop()
         self._remove_bubble(self.thinking_bubble)
         self.thinking_bubble = None
+        if self.plugin_progress_bubble and not sip.isdeleted(self.plugin_progress_bubble):
+            self.plugin_progress_lines.append("キャンセル: 処理を中断しました。")
+            self.plugin_progress_bubble.setText(_to_rich("\n".join(self.plugin_progress_lines)))
+        self.plugin_progress_bubble = None
+        self.plugin_progress_lines = []
         self._streaming_response = ""
         self._display_pending = False
         self.thread = None
@@ -958,22 +869,49 @@ class ChatWidget(QWidget):
         """CLI 実行をバックグラウンドで行い、LLM 待ちで UI を止めないようにする。"""
         self._display_pending = True
         self._is_streaming = True
-        self.thinking_bubble = self._add_bubble("assistant", "・", persist=False, focus=False)
-        self.thinking_bubble.setMinimumWidth(min(self._bubble_max_width(), 320))
-        self.thinking_frame = 0
-        self.thinking_timer.start()
+        if action_def.display == "progress":
+            self.plugin_progress_lines = ["処理を開始しています..."]
+            self.plugin_progress_bubble = self._add_bubble(
+                "assistant", self.plugin_progress_lines[0], persist=False, focus=False
+            )
+        else:
+            self.thinking_bubble = self._add_bubble("assistant", "・", persist=False, focus=False)
+            self.thinking_bubble.setMinimumWidth(min(self._bubble_max_width(), 320))
+            self.thinking_frame = 0
+            self.thinking_timer.start()
         self.plugin_thread = PluginActionThread(self.plugin_manager, plugin, action_def, command, self.llm)
+        if action_def.display == "progress":
+            self.plugin_thread.progress.connect(self._on_plugin_progress)
         self.plugin_thread.completed.connect(lambda result: self._on_plugin_completed(result, action_def))
         self.plugin_thread.cancelled.connect(self._on_llm_cancelled)
         self.cancel_button.setEnabled(True)
         self.plugin_thread.start()
 
+    def _on_plugin_progress(self, _pid: str, text: str):
+        if not self.plugin_progress_bubble or sip.isdeleted(self.plugin_progress_bubble):
+            return
+        self.plugin_progress_lines.append(text)
+        if len(self.plugin_progress_lines) > 30:
+            self.plugin_progress_lines = self.plugin_progress_lines[-30:]
+        self.plugin_progress_bubble.setText(_to_rich("\n".join(self.plugin_progress_lines)))
+        row = self.plugin_progress_bubble.parentWidget()
+        if row is not None:
+            self._request_focus(row)
+
     def _on_plugin_completed(self, result: dict, action_def: PluginAction):
         self._is_streaming = False
         self.thinking_timer.stop()
-        if self.thinking_bubble:
-            self._remove_bubble(self.thinking_bubble)
-            self.thinking_bubble = None
+        if action_def.display == "progress":
+            if self.plugin_progress_bubble and not sip.isdeleted(self.plugin_progress_bubble):
+                status = "完了" if result.get("ok", True) else f"失敗: {result.get('error', '不明なエラー')}"
+                self.plugin_progress_lines.append(status)
+                self.plugin_progress_bubble.setText(_to_rich("\n".join(self.plugin_progress_lines)))
+            self.plugin_progress_bubble = None
+            self.plugin_progress_lines = []
+        else:
+            if self.thinking_bubble:
+                self._remove_bubble(self.thinking_bubble)
+                self.thinking_bubble = None
         self._display_pending = False
         self.plugin_thread = None
         self._render_plugin_result(result, action_def)
@@ -993,8 +931,6 @@ class ChatWidget(QWidget):
             "confirm_create": self._confirm_create,
             "confirm_delete": self._confirm_delete,
             "confirm_update": self._confirm_update,
-            # YouTube Downloader
-            "download_video": self._download_video,
             # GetNewTechInfo
             "count_tech_news": self._count_tech_news,
             "search_tech_news": self._search_tech_news,
@@ -1024,7 +960,17 @@ class ChatWidget(QWidget):
             self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
             return
         display = action.display
-        if display == "text":
+        if display == "progress":
+            template = action.display_template
+            if template:
+                try:
+                    text = template.format(**result)
+                except (KeyError, ValueError):
+                    text = "処理が完了しました。"
+            else:
+                text = "処理が完了しました。"
+            self._add_bubble("assistant", text)
+        elif display == "text":
             template = action.display_template
             if template:
                 try:
@@ -1509,101 +1455,6 @@ class ChatWidget(QWidget):
             self._add_bubble("assistant", f"カテゴリ「{name}」を削除しました。")
         except TechNewsError as exc:
             self._add_bubble("assistant", f"エラー: {exc}")
-
-    def _download_video(self, command: dict):
-        if not self.downloader:
-            self._add_bubble("assistant", "動画ダウンロード機能の設定が未完了です。")
-            return
-        if self.download_thread and self.download_thread.isRunning():
-            self._add_bubble("assistant", "現在ダウンロード処理中です。完了までお待ちください。")
-            return
-
-        urls = []
-        raw_urls = command.get("urls")
-        if isinstance(raw_urls, list):
-            urls.extend(str(url).strip() for url in raw_urls if str(url).strip())
-        single_url = str(command.get("url", "")).strip()
-        if single_url:
-            urls.append(single_url)
-        if not urls:
-            self._add_bubble("assistant", "ダウンロードするURLが見つかりませんでした。")
-            return
-        urls = list(dict.fromkeys(urls))
-
-        audio_only = bool(command.get("audio_only", True))
-        raw_output_dir = command.get("output_dir")
-        output_dir = str(raw_output_dir).strip() if raw_output_dir else None
-        allow_playlist = bool(command.get("playlist", False)) or any(
-            "/playlist" in url or "list=" in url for url in urls
-        )
-        stems = _normalize_stems(command.get("stems"))
-        mode_label = "音源のみ" if audio_only else "動画+音源"
-        if stems:
-            mode_label += f" / 音源分離: {', '.join(stems)}"
-        lines = "\n".join(urls)
-        destination = output_dir if output_dir else "(既定) Downloads"
-        self.download_progress_lines = [
-            f"{mode_label}のダウンロードを開始します（{len(urls)}件）。",
-            f"保存先: {destination}",
-            *urls,
-            "状態: 準備中...",
-        ]
-        self.download_progress_bubble = self._add_bubble("assistant", "\n".join(self.download_progress_lines))
-        self.send_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.download_thread = VideoDownloadThread(
-            self.downloader, urls, audio_only, output_dir, stems, allow_playlist
-        )
-        self.download_thread.progress.connect(self._on_download_progress)
-        self.download_thread.completed.connect(self._on_download_completed)
-        self.download_thread.failed.connect(self._on_download_failed)
-        self.download_thread.cancelled.connect(self._on_download_cancelled)
-        self.download_thread.start()
-
-    def _on_download_progress(self, message: str):
-        if not self.download_progress_bubble:
-            return
-        if not message:
-            return
-        self.download_progress_lines[-1] = message
-        self.download_progress_bubble.setText(_to_rich("\n".join(self.download_progress_lines)))
-        row = self.download_progress_bubble.parentWidget()
-        if row is not None:
-            self._request_focus(row)
-
-    def _on_download_completed(self, output: str):
-        if self.download_progress_bubble:
-            self.download_progress_lines[-1] = "完了: すべてのダウンロードが終了しました。"
-            self.download_progress_bubble.setText(_to_rich("\n".join(self.download_progress_lines)))
-        folder = getattr(self.download_thread, "effective_output_dir", "")
-        self._add_bubble("assistant", f"ダウンロード完了。\n保存先: {folder}")
-        self.download_thread = None
-        self.send_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-
-    def _on_download_failed(self, message: str):
-        if self.download_progress_bubble:
-            self.download_progress_lines[-1] = "失敗: 一部または全部のダウンロードに失敗しました。"
-            self.download_progress_bubble.setText(_to_rich("\n".join(self.download_progress_lines)))
-        self._add_bubble("assistant", f"エラー: {message}")
-        self.download_thread = None
-        self.send_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-
-    def _on_download_cancelled(self):
-        if self.download_progress_bubble:
-            self.download_progress_lines[-1] = "キャンセル: ダウンロードを中断しました。"
-            self.download_progress_bubble.setText(_to_rich("\n".join(self.download_progress_lines)))
-        self.download_thread = None
-        self.send_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-
-    @staticmethod
-    def _is_download_request(text: str) -> bool:
-        trigger_keywords = ("ダウンロード", "取得", "保存", "頂戴", "ちょうだい")
-        if any(keyword in text for keyword in trigger_keywords):
-            return True
-        return bool(re.search(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/", text, re.IGNORECASE))
 
     def _apply_relative_agenda(self, command: dict | None) -> dict | None:
         if not any(word in self.last_user_text for word in ("予定", "スケジュール", "カレンダー")):

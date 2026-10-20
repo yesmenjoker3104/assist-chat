@@ -14,6 +14,11 @@
       "name": "WebSearch",
       "description": "DuckDuckGo で Web 検索し、結果を LLM で要約します。追加のアカウントや API キーは不要です。",
       "url": "https://github.com/yesmenjoker3104/web-search/releases/latest/download/WebSearch.zip"
+    },
+    {
+      "name": "YoutubeAudioDownloader",
+      "description": "YouTube の動画・音声を MP3 または MP4 でダウンロードします。Demucs による AI 音源分離（ボーカル・ドラム・ベース等の抽出）にも対応。",
+      "url": "https://github.com/yesmenjoker3104/youtube-audio-downloader/releases/latest/download/YoutubeAudioDownloader-Windows.zip"
     }
   ]
 }

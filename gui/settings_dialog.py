@@ -111,8 +111,6 @@ class SettingsDialog(QDialog):
 
         self.gws_command = QLineEdit()
         form.addRow("gws コマンド", self.gws_command)
-        self.download_output_dir = QLineEdit()
-        form.addRow("動画保存先", self.download_output_dir)
         self.auto_fetch_enabled = QCheckBox("技術記事を自動取得して通知する")
         form.addRow("技術記事", self.auto_fetch_enabled)
         self.auto_fetch_minutes = QSpinBox()
@@ -144,7 +142,6 @@ class SettingsDialog(QDialog):
         settings = load_settings()
         self.ollama_url.setText(settings["ollama_url"])
         self.gws_command.setText(settings["gws_command"])
-        self.download_output_dir.setText(settings.get("youtube_download_output_dir") or "")
         self.auto_fetch_enabled.setChecked(settings.get("tech_news_auto_fetch_enabled", True))
         self.auto_fetch_minutes.setValue(int(settings.get("tech_news_auto_fetch_minutes", 30)))
         self.history_retention.setValue(int(settings.get("chat_history_retention", 5000)))
@@ -257,7 +254,6 @@ class SettingsDialog(QDialog):
             "ollama_url": self.ollama_url.text().strip() or "http://127.0.0.1:11434",
             "model": self.model_combo.currentText().strip() or settings["model"],
             "gws_command": self.gws_command.text().strip() or "gws",
-            "youtube_download_output_dir": self.download_output_dir.text().strip() or None,
             "tech_news_auto_fetch_enabled": self.auto_fetch_enabled.isChecked(),
             "tech_news_auto_fetch_minutes": self.auto_fetch_minutes.value(),
             "chat_history_retention": self.history_retention.value(),
