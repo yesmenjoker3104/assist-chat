@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from backend.plugin_manager import Plugin
 
 CATALOG_URL = "https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json"
-MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 700 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 _USER_AGENT = "AssistChat-PluginInstaller"
 _NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
