@@ -14,9 +14,9 @@
     },
     {
       "name": "WebSearch",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "DuckDuckGo で Web 検索し、結果を LLM で要約します。追加のアカウントや API キーは不要です。",
-      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-websearch-v0.1.0/WebSearch.zip"
+      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-websearch-v0.1.1/WebSearch.zip"
     }
   ]
 }
