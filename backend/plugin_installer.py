@@ -220,6 +220,42 @@ def _remove_installed_file(target: Path, relative: str) -> None:
         parent = parent.parent
 
 
+def _ensure_writable(path: Path) -> None:
+    """Fail before anything is changed when a file is locked, e.g. its executable is running."""
+    try:
+        with path.open("ab"):
+            pass
+    except OSError as exc:
+        raise PluginInstallError(
+            f"{path.name} を更新できません。プラグインが実行中でないか確認して、もう一度お試しください。"
+        ) from exc
+
+
+_Journal = list[tuple[Path, Path | None]]
+
+
+def _backup(path: Path, backup_root: Path, journal: _Journal) -> None:
+    """Record the current state of path; None means the path did not exist before."""
+    if path.is_file():
+        backup = backup_root / str(len(journal))
+        shutil.copy2(path, backup)
+        journal.append((path, backup))
+    else:
+        journal.append((path, None))
+
+
+def _rollback(journal: _Journal) -> None:
+    for path, backup in reversed(journal):
+        try:
+            if backup is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, path)
+        except OSError:
+            continue
+
+
 def install_package(package: PluginPackage, plugin_root: Path, replace: bool) -> Path:
     """Copy the package into plugin_root/<name>.
 
@@ -228,24 +264,53 @@ def install_package(package: PluginPackage, plugin_root: Path, replace: bool) ->
     - files installed by the previous version (recorded in INSTALL_MANIFEST) that the new
       package no longer ships are deleted, unless preserved
     - files that were never installed by the package (e.g. runtime data) are left untouched
+
+    If any step fails, the previous state is restored. Locked files are detected before any change.
     """
     target = plugin_root / package.name
     if target.exists() and not replace:
         raise PluginExistsError(f"{package.name} は既に存在します。")
     plugin_root.mkdir(parents=True, exist_ok=True)
     new_files = _package_files(package.source_dir)
+    stale: list[str] = []
     if target.exists():
-        for relative in sorted(_read_install_manifest(target) - new_files):
-            if not _is_preserved(relative, package.preserve):
-                _remove_installed_file(target, relative)
-    for relative in sorted(new_files):
-        destination = target / relative
-        if destination.exists() and _is_preserved(relative, package.preserve):
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(package.source_dir / relative, destination)
-    manifest = {"version": package.version, "files": sorted(new_files)}
-    (target / INSTALL_MANIFEST).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+        stale = [
+            relative
+            for relative in sorted(_read_install_manifest(target) - new_files)
+            if not _is_preserved(relative, package.preserve)
+        ]
+    to_write = [
+        relative
+        for relative in sorted(new_files)
+        if not ((target / relative).exists() and _is_preserved(relative, package.preserve))
+    ]
+    for relative in [*stale, *to_write]:
+        path = target / relative
+        if path.is_file():
+            _ensure_writable(path)
+
+    created_target = not target.exists()
+    backup_root = Path(tempfile.mkdtemp(prefix="assist-chat-plugin-backup-"))
+    journal: _Journal = []
+    try:
+        for relative in stale:
+            _backup(target / relative, backup_root, journal)
+            _remove_installed_file(target, relative)
+        for relative in to_write:
+            destination = target / relative
+            _backup(destination, backup_root, journal)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(package.source_dir / relative, destination)
+        manifest_path = target / INSTALL_MANIFEST
+        _backup(manifest_path, backup_root, journal)
+        manifest = {"version": package.version, "files": sorted(new_files)}
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    except BaseException:
+        if created_target:
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            _rollback(journal)
+        raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
     return target
