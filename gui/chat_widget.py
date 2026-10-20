@@ -1120,10 +1120,11 @@ class ChatWidget(QWidget):
         messages = self.history.latest(self.history_llm_turns * 2 + 1)
         if messages and messages[-1]["role"] == "user" and messages[-1]["content"] == current_text:
             messages = messages[:-1]
-        lines = ["\n過去の会話（参考情報。今回の依頼を優先）:"]
-        for message in messages[-self.history_llm_turns * 2:]:
-            role = "ユーザー" if message["role"] == "user" else "アシスタント"
-            lines.append(f"{role}: {message['content']}")
+        # Assistant replies are left out: they can repeat earlier refusals and push the router to skip plugins.
+        user_messages = [m["content"] for m in messages if m["role"] == "user"][-self.history_llm_turns:]
+        lines = ["\n過去のユーザーの依頼（参考情報。今回の依頼を優先）:"]
+        for content in user_messages:
+            lines.append(f"ユーザー: {content}")
         lines.append(f"今回の依頼: {current_text}")
         return "\n".join(lines)
 
