@@ -303,7 +303,14 @@ class RoutingThread(QThread):
             })
             return
 
-        self.route_llm.emit(self.prompt)
+        link_urls = [url for url in direct_urls if url not in text]
+        prompt = self.prompt
+        if link_urls:
+            prompt += (
+                "\n\n本文中のリンク先（ユーザーがリンクとして指定したURL。この値をそのまま使うこと）:\n"
+                + "\n".join(link_urls)
+            )
+        self.route_llm.emit(prompt)
 
 
 class PluginActionThread(QThread):
