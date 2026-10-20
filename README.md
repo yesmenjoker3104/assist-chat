@@ -67,11 +67,14 @@ gws auth setup --login
 
 ### 標準モジュール
 
+標準のプラグインは `plugin/` に入っていません。「プラグイン > おすすめプラグインから導入...」で導入すると `plugin/<名前>/` に配置されます。
+
 | フォルダ | 概要 |
 |---|---|
-| `plugin/GCalCtrl/` | Google Calendarの予定確認・追加・削除（[gcal-ctrl](https://github.com/yesmenjoker3104/gcal-ctrl) ビルド成果物） |
-| `plugin/GetNewTechInfo/` | 技術記事の取得・検索・ソース管理（RSS/Atom） |
-| `plugin/YoutubeAudioDownloader/` | YouTube等からの動画・音声ダウンロード |
+| `plugin/GmailCtrl/` | Gmail の受信メール一覧の取得と下書き作成（おすすめカタログから導入） |
+| `plugin/GetNewTechInfo/` | 技術記事の取得・検索・ソース管理（RSS/Atom、おすすめカタログから導入） |
+| `plugin/WebSearch/` | DuckDuckGo による Web 検索と要約（おすすめカタログから導入） |
+| `plugin/YoutubeAudioDownloader/` | YouTube等からの動画・音声ダウンロード（カタログ未掲載のため手動で配置） |
 
 ### プラグインの導入（アプリ内）
 
