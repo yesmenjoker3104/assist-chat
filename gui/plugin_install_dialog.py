@@ -21,14 +21,14 @@ def _status_for(entry: CatalogEntry, installed_versions: dict[str, str]) -> tupl
     if entry.name not in installed_versions:
         return "未導入", "導入"
     current = installed_versions[entry.name]
-    if not entry.version or not current:
+    if not entry.latest_version or not current:
         return "導入済み", "導入"
     try:
-        newer = is_newer_version(entry.version, current)
+        newer = is_newer_version(entry.latest_version, current)
     except ValueError:
         return "導入済み", "導入"
     if newer:
-        return f"更新あり（v{current} → v{entry.version}）", "更新"
+        return f"更新あり（v{current} → v{entry.latest_version}）", "更新"
     return f"最新（v{current}）", "導入"
 
 

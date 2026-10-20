@@ -2,21 +2,18 @@
   "plugins": [
     {
       "name": "GmailCtrl",
-      "version": "1.0.0",
       "description": "Gmail の受信メール一覧の取得と下書き作成ができます。動作には gws CLI のインストールと設定が必要です（GWS_COMMAND で指定）。",
-      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-gmailctrl-v1.0.0/GmailCtrl.zip"
+      "url": "https://github.com/yesmenjoker3104/gmail-ctrl/releases/latest/download/GmailCtrl.zip"
     },
     {
       "name": "GetNewTechInfo",
-      "version": "0.1.0",
       "description": "技術記事の取得・管理（RSS/Atom フィード）。",
-      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-getnewtechinfo-v0.1.0/GetNewTechInfo.zip"
+      "url": "https://github.com/yesmenjoker3104/get_new_tech_info/releases/latest/download/GetNewTechInfo.zip"
     },
     {
       "name": "WebSearch",
-      "version": "0.1.1",
       "description": "DuckDuckGo で Web 検索し、結果を LLM で要約します。追加のアカウントや API キーは不要です。",
-      "url": "https://github.com/yesmenjoker3104/assist-chat/releases/download/plugin-websearch-v0.1.1/WebSearch.zip"
+      "url": "https://github.com/yesmenjoker3104/web-search/releases/latest/download/WebSearch.zip"
     }
   ]
 }

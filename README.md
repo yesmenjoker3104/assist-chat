@@ -82,6 +82,8 @@ gws auth setup --login
 
 導入時は提供元と警告を表示して確認します。おすすめ一覧には「未導入／更新あり（vX → vY）／最新」が表示され、更新がある場合はボタンが「更新」になります。同じ名前のプラグインが既にある場合は上書きの確認を出します。
 
+おすすめ一覧の更新判定は、カタログの URL（`https://github.com/<owner>/<repo>/releases/latest/download/<ファイル名>.zip`）から GitHub の最新リリースのタグを取得し、導入済みの `plugin.json` の版と比べて行います。カタログには版を書きません。タグ（`vX.Y.Z`）と ZIP 内 `plugin.json` の版は一致させてください。最新版を取得できない場合（オフラインやAPI制限など）は「導入済み」と表示します。
+
 更新時は次のように扱います。
 - 新しいZIPに含まれるファイルは上書きします。
 - 前回の導入で入ったファイルのうち、新しいZIPに含まれないものは削除します（導入時に `.install_manifest.json` に記録したファイルだけが対象です）。
@@ -93,6 +95,23 @@ gws auth setup --login
 - プラグイン導入処理のテストは `python -m unittest tests.test_plugin_installer` で実行できます。
 
 ZIPの中身は、`plugin.json` のあるフォルダ1つを含む形（または `plugin.json` をルートに置く形）にしてください。
+
+### プラグインの配布方法（開発者向け）
+
+おすすめプラグインは、プラグインごとの公開リポジトリの最新リリース（Latest）から配布します。
+
+1. **リポジトリを公開する**: `releases/latest` は匿名で取得できるよう、公開リポジトリにしておきます。
+2. **ZIPを作る**: `plugin.json` と実行ファイルを含むZIPを作ります（上記の中身のルールに従う）。
+3. **リリースを作る**: タグは `vX.Y.Z`（`plugin.json` の `version` と一致させる）。Pre-release にせず、**Latest** として公開します。アセット名はカタログの URL に合わせて固定します（例: `WebSearch.zip`）。
+4. **カタログに登録する**: `plugin_catalog.json` に `name`・`description`・`url` を書きます。`url` は `https://github.com/<owner>/<repo>/releases/latest/download/<アセット名>` の形式で、版は書きません。
+5. **カタログを push する**: アプリは `master` の `plugin_catalog.json` を読みます。push 後に反映されます。
+
+更新するときは、新しいバージョンでリリース（Latest）を作るだけです。カタログは変更不要です。アプリは最新リリースのタグと導入済みの版を比べて「更新あり」を表示します。
+
+- Pre-release（`dev-latest` など）は Latest に含まれないため、更新判定の対象になりません。
+- 最新リリースが無い、または API の制限に当たった場合は「導入済み」と表示され、導入自体はできます（ZIPが無い場合は導入に失敗します）。
+- 現在の配布元: GmailCtrl（`yesmenjoker3104/gmail-ctrl`）、GetNewTechInfo（`yesmenjoker3104/get_new_tech_info`）、WebSearch（`yesmenjoker3104/web-search`）。
+- 旧 `assist-chat` の `plugin-*` リリースは残しています。カタログからは参照しません。
 
 ### 新しいモジュールの追加方法
 

@@ -25,7 +25,7 @@
 | `backend/plugin_manager.py` | プラグイン発見・ルーティング・CLI実行・`reload()` |
 | `backend/plugin_installer.py` | プラグインZIPのURL取得・検証・展開・上書き導入、おすすめカタログ取得 |
 | `gui/plugin_install_dialog.py` | おすすめプラグイン一覧ダイアログ |
-| `plugin_catalog.json` | おすすめプラグイン一覧（`https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json` で取得）。各項目に `name`・`version`（導入済みとの比較に使用）・`description`・`url` を書く。ZIPのURLは公開されたものだけを載せ、`version` はZIP内 `plugin.json` の版と一致させる |
+| `plugin_catalog.json` | おすすめプラグイン一覧（`https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json` で取得）。各項目に `name`・`description`・`url` を書く。`url` はプラグイン専用リポジトリの `https://github.com/<owner>/<repo>/releases/latest/download/<ファイル名>.zip` とし、版は書かない（最新版はアプリがリリースタグから取得する）。ZIPの中の `plugin.json` の版とリリースのタグ（`vX.Y.Z`）は一致させる |
 | `config.py` | 設定とプロジェクト内データパス |
 | `gui/main_window.py` | メインウィンドウとOllama起動管理 |
 | `gui/chat_widget.py` | チャットUI、LLM解釈、操作確認フロー |

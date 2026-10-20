@@ -18,6 +18,9 @@ MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 _USER_AGENT = "AssistChat-PluginInstaller"
 _NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+_LATEST_DOWNLOAD_PATTERN = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases/latest/download/[^/]+"
+)
 INSTALL_MANIFEST = ".install_manifest.json"
 
 
@@ -34,7 +37,7 @@ class CatalogEntry:
     name: str
     description: str
     url: str
-    version: str = ""
+    latest_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,24 @@ def _open(url: str, timeout: float):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def fetch_latest_release_version(url: str, timeout: float = 10.0) -> str:
+    """Return the tag of the repository's latest release without the leading "v".
+
+    Only ``https://github.com/<owner>/<repo>/releases/latest/download/<asset>`` URLs
+    can be checked. Returns "" when the version is unknown (other URL, network error).
+    """
+    match = _LATEST_DOWNLOAD_PATTERN.fullmatch(url)
+    if match is None:
+        return ""
+    api_url = f"https://api.github.com/repos/{match[1]}/{match[2]}/releases/latest"
+    try:
+        with _open(api_url, timeout) as response:
+            tag = str(json.load(response).get("tag_name", ""))
+    except (OSError, ValueError):
+        return ""
+    return tag[1:] if tag[:1] in ("v", "V") else tag
+
+
 def fetch_catalog(url: str = CATALOG_URL, timeout: float = 10.0) -> list[CatalogEntry]:
     _require_https(url)
     with _open(url, timeout) as response:
@@ -77,7 +98,7 @@ def fetch_catalog(url: str = CATALOG_URL, timeout: float = 10.0) -> list[Catalog
                 name=name,
                 description=str(item.get("description", "")),
                 url=entry_url,
-                version=str(item.get("version", "")),
+                latest_version=fetch_latest_release_version(entry_url, timeout),
             )
         )
     return entries

@@ -31,6 +31,55 @@ def make_package(root: Path, files: dict[str, str], version: str = "1.0.0", pres
     )
 
 
+class _FakeResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, *args):
+        return self._payload
+
+
+class CatalogVersionTest(unittest.TestCase):
+    LATEST_URL = "https://github.com/owner/repo/releases/latest/download/Demo.zip"
+    API_URL = "https://api.github.com/repos/owner/repo/releases/latest"
+
+    def test_latest_version_comes_from_release_tag(self):
+        with mock.patch.object(plugin_installer, "_open", return_value=_FakeResponse(b'{"tag_name": "v0.2.0"}')) as opened:
+            self.assertEqual(plugin_installer.fetch_latest_release_version(self.LATEST_URL), "0.2.0")
+        self.assertEqual(opened.call_args.args[0], self.API_URL)
+
+    def test_pinned_url_cannot_be_checked(self):
+        pinned = "https://github.com/owner/repo/releases/download/v0.1.0/Demo.zip"
+        with mock.patch.object(plugin_installer, "_open") as opened:
+            self.assertEqual(plugin_installer.fetch_latest_release_version(pinned), "")
+        opened.assert_not_called()
+
+    def test_network_error_yields_unknown_version(self):
+        with mock.patch.object(plugin_installer, "_open", side_effect=OSError("offline")):
+            self.assertEqual(plugin_installer.fetch_latest_release_version(self.LATEST_URL), "")
+
+    def test_fetch_catalog_ignores_catalog_version_field(self):
+        catalog = json.dumps(
+            {"plugins": [{"name": "Demo", "version": "9.9.9", "description": "d", "url": self.LATEST_URL}]}
+        ).encode("utf-8")
+
+        def fake_open(url, timeout):
+            if url == plugin_installer.CATALOG_URL:
+                return _FakeResponse(catalog)
+            return _FakeResponse(b'{"tag_name": "v0.2.0"}')
+
+        with mock.patch.object(plugin_installer, "_open", side_effect=fake_open):
+            entries = plugin_installer.fetch_catalog()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].latest_version, "0.2.0")
+
+
 class InstallPackageTest(unittest.TestCase):
     def setUp(self):
         self._tmp = Path(tempfile.mkdtemp(prefix="plugin-installer-test-"))
