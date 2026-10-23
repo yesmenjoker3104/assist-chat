@@ -19,6 +19,11 @@
       "name": "YoutubeAudioDownloader",
       "description": "YouTube の動画・音声を MP3 または MP4 でダウンロードします。Demucs による AI 音源分離（ボーカル・ドラム・ベース等の抽出）にも対応。",
       "url": "https://github.com/yesmenjoker3104/youtube-audio-downloader/releases/latest/download/YoutubeAudioDownloader-Windows.zip"
+    },
+    {
+      "name": "GCalCtrl",
+      "description": "Google カレンダーの予定の一覧・作成・更新・削除と、空き時間の検索ができます。動作には gws CLI のインストールと設定が必要です（GWS_COMMAND で指定）。",
+      "url": "https://github.com/yesmenjoker3104/gcal-ctrl/releases/latest/download/GCalCtrl.zip"
     }
   ]
 }

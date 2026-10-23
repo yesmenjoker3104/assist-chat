@@ -74,6 +74,7 @@ gws auth setup --login
 | `plugin/GmailCtrl/` | Gmail の受信メール一覧の取得と下書き作成（おすすめカタログから導入） |
 | `plugin/GetNewTechInfo/` | 技術記事の取得・検索・ソース管理（RSS/Atom、おすすめカタログから導入） |
 | `plugin/WebSearch/` | DuckDuckGo による Web 検索と要約（おすすめカタログから導入） |
+| `plugin/GCalCtrl/` | Google カレンダーの予定の一覧・作成・更新・削除と空き時間の検索（おすすめカタログから導入） |
 | `plugin/YoutubeAudioDownloader/` | YouTube等からの動画・音声ダウンロード（カタログ未掲載のため手動で配置） |
 
 ### プラグインの導入（アプリ内）
@@ -113,7 +114,7 @@ ZIPの中身は、`plugin.json` のあるフォルダ1つを含む形（また�
 
 - Pre-release（`dev-latest` など）は Latest に含まれないため、更新判定の対象になりません。
 - 最新リリースが無い、または API の制限に当たった場合は「導入済み」と表示され、導入自体はできます（ZIPが無い場合は導入に失敗します）。
-- 現在の配布元: GmailCtrl（`yesmenjoker3104/gmail-ctrl`）、GetNewTechInfo（`yesmenjoker3104/get_new_tech_info`）、WebSearch（`yesmenjoker3104/web-search`）。
+- 現在の配布元: GmailCtrl（`yesmenjoker3104/gmail-ctrl`）、GetNewTechInfo（`yesmenjoker3104/get_new_tech_info`）、WebSearch（`yesmenjoker3104/web-search`）、GCalCtrl（`yesmenjoker3104/gcal-ctrl`）。
 - 旧 `assist-chat` の `plugin-*` リリースは残しています。カタログからは参照しません。
 
 ### 新しいモジュールの追加方法
