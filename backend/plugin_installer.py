@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -104,20 +105,33 @@ def fetch_catalog(url: str = CATALOG_URL, timeout: float = 10.0) -> list[Catalog
     return entries
 
 
-def download_archive(url: str, destination: Path, timeout: float = 60.0) -> Path:
+def download_archive(
+    url: str,
+    destination: Path,
+    timeout: float = 60.0,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Save the archive to ``destination``.
+
+    ``progress_callback(downloaded, total)`` is called after each chunk. ``total`` is 0
+    when the server does not send a Content-Length.
+    """
     _require_https(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
+    downloaded = 0
     with _open(url, timeout) as response, destination.open("wb") as output:
+        expected = int(response.headers.get("Content-Length") or 0)
         while chunk := response.read(1024 * 1024):
-            total += len(chunk)
-            if total > MAX_ARCHIVE_BYTES:
+            downloaded += len(chunk)
+            if downloaded > MAX_ARCHIVE_BYTES:
                 raise PluginInstallError(
                     f"ファイルが大きすぎます（上限{MAX_ARCHIVE_BYTES // (1024 * 1024)}MB）。"
                 )
             output.write(chunk)
-    with destination.open("rb") as downloaded:
-        if downloaded.read(2) != b"PK":
+            if progress_callback:
+                progress_callback(downloaded, expected)
+    with destination.open("rb") as downloaded_file:
+        if downloaded_file.read(2) != b"PK":
             raise PluginInstallError("ダウンロードしたファイルはZIPではありません。")
     return destination
 
@@ -181,12 +195,16 @@ def inspect_archive(archive: Path, source_url: str = "") -> PluginPackage:
         raise PluginInstallError(f"プラグインの読み込みに失敗しました: {exc}") from exc
 
 
-def fetch_package(url: str, timeout: float = 60.0) -> PluginPackage:
+def fetch_package(
+    url: str,
+    timeout: float = 60.0,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> PluginPackage:
     """Download a plugin ZIP from an HTTPS URL and validate it."""
     _require_https(url)
     download_dir = Path(tempfile.mkdtemp(prefix="assist-chat-download-"))
     try:
-        archive = download_archive(url, download_dir / "plugin.zip", timeout)
+        archive = download_archive(url, download_dir / "plugin.zip", timeout, progress_callback)
         return inspect_archive(archive, url)
     finally:
         shutil.rmtree(download_dir, ignore_errors=True)

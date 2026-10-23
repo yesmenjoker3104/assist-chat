@@ -69,14 +69,19 @@ class UpdateWorker(QThread):
 class CallWorker(QThread):
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
 
-    def __init__(self, func, parent=None):
+    def __init__(self, func, parent=None, *, reports_progress: bool = False):
         super().__init__(parent)
         self._func = func
+        self._reports_progress = reports_progress
 
     def run(self) -> None:
         try:
-            self.done.emit(self._func())
+            if self._reports_progress:
+                self.done.emit(self._func(lambda done, total: self.progress.emit(done, total)))
+            else:
+                self.done.emit(self._func())
         except Exception as error:
             self.failed.emit(str(error))
 
@@ -264,9 +269,10 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._run_plugin_task(
-            lambda: fetch_package(url),
+            lambda report: fetch_package(url, progress_callback=report),
             "プラグインをダウンロードしています...",
             self._on_package_ready,
+            reports_progress=True,
         )
 
     def _on_package_ready(self, package: PluginPackage):
@@ -300,7 +306,7 @@ class MainWindow(QMainWindow):
             "チャットからすぐに利用できます。",
         )
 
-    def _run_plugin_task(self, func, message: str, on_done):
+    def _run_plugin_task(self, func, message: str, on_done, *, reports_progress: bool = False):
         if self._plugin_worker is not None and self._plugin_worker.isRunning():
             QMessageBox.information(self, "プラグイン", "別のプラグイン処理が実行中です。完了後にもう一度お試しください。")
             return
@@ -309,11 +315,29 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
-        worker = CallWorker(func, self)
+        worker = CallWorker(func, self, reports_progress=reports_progress)
         self._plugin_worker = worker
+        if reports_progress:
+            worker.progress.connect(lambda done, total: self._update_download_progress(progress, done, total))
         worker.done.connect(lambda result: (progress.close(), on_done(result)))
         worker.failed.connect(lambda msg: (progress.close(), QMessageBox.warning(self, "プラグイン", msg)))
         worker.start()
+
+    @staticmethod
+    def _update_download_progress(progress: QProgressDialog, downloaded: int, total: int) -> None:
+        mb = 1024 * 1024
+        if total <= 0:
+            progress.setRange(0, 0)
+            progress.setLabelText(f"プラグインをダウンロードしています... {downloaded / mb:.1f} MB")
+        elif downloaded >= total:
+            progress.setRange(0, 0)
+            progress.setLabelText("ダウンロード完了。プラグインを展開・検証しています...")
+        else:
+            progress.setRange(0, 100)
+            progress.setValue(downloaded * 100 // total)
+            progress.setLabelText(
+                f"プラグインをダウンロードしています... {downloaded / mb:.1f} / {total / mb:.1f} MB"
+            )
 
     def show_plugin_list(self):
         import json as _json

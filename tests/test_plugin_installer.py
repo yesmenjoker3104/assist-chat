@@ -1,3 +1,4 @@
+import io
 import json
 import shutil
 import tempfile
@@ -43,6 +44,51 @@ class _FakeResponse:
 
     def read(self, *args):
         return self._payload
+
+
+class _ChunkedResponse:
+    def __init__(self, payload: bytes, content_length: int | None):
+        self._stream = io.BytesIO(payload)
+        self.headers = {} if content_length is None else {"Content-Length": str(content_length)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, size: int = -1):
+        return self._stream.read(size)
+
+
+class DownloadProgressTest(unittest.TestCase):
+    URL = "https://example.com/Demo.zip"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.payload = b"PK" + b"x" * (2 * 1024 * 1024 + 10)
+
+    def test_progress_reports_downloaded_and_total_bytes(self):
+        calls = []
+        response = _ChunkedResponse(self.payload, len(self.payload))
+        with mock.patch.object(plugin_installer, "_open", return_value=response):
+            plugin_installer.download_archive(
+                self.URL, self.tmp / "plugin.zip", progress_callback=lambda d, t: calls.append((d, t))
+            )
+        total = len(self.payload)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1], (total, total))
+        self.assertTrue(all(t == total for _, t in calls))
+
+    def test_progress_total_is_zero_without_content_length(self):
+        calls = []
+        response = _ChunkedResponse(self.payload, None)
+        with mock.patch.object(plugin_installer, "_open", return_value=response):
+            plugin_installer.download_archive(
+                self.URL, self.tmp / "plugin.zip", progress_callback=lambda d, t: calls.append((d, t))
+            )
+        self.assertEqual(calls[-1], (len(self.payload), 0))
 
 
 class CatalogVersionTest(unittest.TestCase):
