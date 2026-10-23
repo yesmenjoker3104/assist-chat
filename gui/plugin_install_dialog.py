@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -32,12 +33,16 @@ def _status_for(entry: CatalogEntry, installed_versions: dict[str, str]) -> tupl
     return f"最新（v{current}）", "導入"
 
 
+def _has_update(entry: CatalogEntry, installed_versions: dict[str, str]) -> bool:
+    return _status_for(entry, installed_versions)[0].startswith("更新あり")
+
+
 class RecommendedPluginsDialog(QDialog):
     def __init__(self, entries: list[CatalogEntry], installed_versions: dict[str, str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("おすすめプラグイン")
         self.resize(560, 380)
-        self.selected_url: str | None = None
+        self.selected_urls: list[str] = []
         self._entries = entries
         self._installed_versions = installed_versions
         layout = QVBoxLayout(self)
@@ -45,30 +50,36 @@ class RecommendedPluginsDialog(QDialog):
         for entry in entries:
             label, _ = _status_for(entry, installed_versions)
             item = QListWidgetItem(f"{entry.name}  [{label}]\n{entry.description}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
             item.setData(_URL_ROLE, entry.url)
             self.list_widget.addItem(item)
         if not entries:
             layout.addWidget(QLabel("おすすめプラグインはまだ登録されていません。"))
         layout.addWidget(self.list_widget)
+        select_updates_button = QPushButton("更新ありを全て選択")
+        select_updates_button.clicked.connect(self._check_updates)
+        layout.addWidget(select_updates_button)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._ok_button.setText("導入")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("チェックしたものを導入・更新")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("閉じる")
-        self.list_widget.currentRowChanged.connect(self._update_button_text)
-        buttons.accepted.connect(self._accept_selected)
+        buttons.accepted.connect(self._accept_checked)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _update_button_text(self, row: int) -> None:
-        if 0 <= row < len(self._entries):
-            _, text = _status_for(self._entries[row], self._installed_versions)
-            self._ok_button.setText(text)
+    def _check_updates(self) -> None:
+        for row, entry in enumerate(self._entries):
+            if _has_update(entry, self._installed_versions):
+                self.list_widget.item(row).setCheckState(Qt.CheckState.Checked)
 
-    def _accept_selected(self) -> None:
-        item = self.list_widget.currentItem()
-        if item is None:
+    def _accept_checked(self) -> None:
+        self.selected_urls = [
+            self.list_widget.item(row).data(_URL_ROLE)
+            for row in range(self.list_widget.count())
+            if self.list_widget.item(row).checkState() == Qt.CheckState.Checked
+        ]
+        if not self.selected_urls:
             return
-        self.selected_url = item.data(_URL_ROLE)
         self.accept()

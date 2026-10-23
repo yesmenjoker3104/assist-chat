@@ -254,8 +254,71 @@ class MainWindow(QMainWindow):
     def _on_catalog_loaded(self, entries):
         installed_versions = {p.name: p.version for p in self.plugin_manager.plugins}
         dlg = RecommendedPluginsDialog(entries, installed_versions, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_url:
-            self._start_plugin_download(dlg.selected_url)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_urls:
+            self._start_plugin_batch(dlg.selected_urls)
+
+    def _start_plugin_batch(self, urls: list[str]):
+        answer = QMessageBox.question(
+            self,
+            "プラグインの導入",
+            f"次の{len(urls)}件のプラグインをダウンロードして導入・更新します。\n\n"
+            + "\n".join(urls)
+            + "\n\n既に導入済みのものは上書きします（データファイルは残します）。\n"
+            "プラグインは実行ファイルとして、あなたのアカウントの権限で動作します。\n"
+            "信頼できる提供元のものだけを導入してください。\n\n続けますか？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._batch_queue = list(urls)
+        self._batch_total = len(urls)
+        self._batch_installed: list[str] = []
+        self._batch_failed: list[str] = []
+        self._batch_next()
+
+    def _batch_next(self):
+        if self._plugin_worker is not None:
+            self._plugin_worker.wait()
+        if not self._batch_queue:
+            self._finish_plugin_batch()
+            return
+        url = self._batch_queue.pop(0)
+        position = f"({self._batch_total - len(self._batch_queue)}/{self._batch_total}) "
+        self._run_plugin_task(
+            lambda report: fetch_package(url, progress_callback=report),
+            position + "プラグインをダウンロードしています...",
+            self._on_batch_package_ready,
+            reports_progress=True,
+            on_failed=lambda message: self._on_batch_item_failed(url, message),
+            label_prefix=position,
+        )
+
+    def _on_batch_package_ready(self, package: PluginPackage):
+        runtime_dir = self.plugin_manager.runtime_dir
+        try:
+            install_package(package, runtime_dir, replace=(runtime_dir / package.name).exists())
+            self._batch_installed.append(f"{package.name} v{package.version}")
+        except (PluginInstallError, PluginExistsError, OSError) as error:
+            self._batch_failed.append(f"{package.name}: {error}")
+        finally:
+            package.cleanup()
+        self._batch_next()
+
+    def _on_batch_item_failed(self, url: str, message: str):
+        self._batch_failed.append(f"{url}: {message}")
+        self._batch_next()
+
+    def _finish_plugin_batch(self):
+        self.plugin_manager.reload()
+        lines = []
+        if self._batch_installed:
+            lines.append("導入・更新できたもの:\n" + "\n".join(self._batch_installed))
+        if self._batch_failed:
+            lines.append("失敗したもの:\n" + "\n".join(self._batch_failed))
+        text = "\n\n".join(lines) or "導入するプラグインはありませんでした。"
+        if self._batch_failed:
+            QMessageBox.warning(self, "プラグイン", text)
+        else:
+            QMessageBox.information(self, "プラグイン", text + "\n\nチャットからすぐに利用できます。")
 
     def _start_plugin_download(self, url: str):
         answer = QMessageBox.question(
@@ -306,7 +369,16 @@ class MainWindow(QMainWindow):
             "チャットからすぐに利用できます。",
         )
 
-    def _run_plugin_task(self, func, message: str, on_done, *, reports_progress: bool = False):
+    def _run_plugin_task(
+        self,
+        func,
+        message: str,
+        on_done,
+        *,
+        reports_progress: bool = False,
+        on_failed=None,
+        label_prefix: str = "",
+    ):
         if self._plugin_worker is not None and self._plugin_worker.isRunning():
             QMessageBox.information(self, "プラグイン", "別のプラグイン処理が実行中です。完了後にもう一度お試しください。")
             return
@@ -318,25 +390,31 @@ class MainWindow(QMainWindow):
         worker = CallWorker(func, self, reports_progress=reports_progress)
         self._plugin_worker = worker
         if reports_progress:
-            worker.progress.connect(lambda done, total: self._update_download_progress(progress, done, total))
+            worker.progress.connect(
+                lambda done, total: self._update_download_progress(progress, done, total, label_prefix)
+            )
         worker.done.connect(lambda result: (progress.close(), on_done(result)))
-        worker.failed.connect(lambda msg: (progress.close(), QMessageBox.warning(self, "プラグイン", msg)))
+        if on_failed is None:
+            on_failed = lambda msg: QMessageBox.warning(self, "プラグイン", msg)
+        worker.failed.connect(lambda msg: (progress.close(), on_failed(msg)))
         worker.start()
 
     @staticmethod
-    def _update_download_progress(progress: QProgressDialog, downloaded: int, total: int) -> None:
+    def _update_download_progress(
+        progress: QProgressDialog, downloaded: int, total: int, prefix: str = ""
+    ) -> None:
         mb = 1024 * 1024
         if total <= 0:
             progress.setRange(0, 0)
-            progress.setLabelText(f"プラグインをダウンロードしています... {downloaded / mb:.1f} MB")
+            progress.setLabelText(f"{prefix}プラグインをダウンロードしています... {downloaded / mb:.1f} MB")
         elif downloaded >= total:
             progress.setRange(0, 0)
-            progress.setLabelText("ダウンロード完了。プラグインを展開・検証しています...")
+            progress.setLabelText(f"{prefix}ダウンロード完了。プラグインを展開・検証しています...")
         else:
             progress.setRange(0, 100)
             progress.setValue(downloaded * 100 // total)
             progress.setLabelText(
-                f"プラグインをダウンロードしています... {downloaded / mb:.1f} / {total / mb:.1f} MB"
+                f"{prefix}プラグインをダウンロードしています... {downloaded / mb:.1f} / {total / mb:.1f} MB"
             )
 
     def show_plugin_list(self):
