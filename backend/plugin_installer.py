@@ -15,7 +15,7 @@ from backend.plugin_manager import Plugin
 
 CATALOG_URL = "https://raw.githubusercontent.com/yesmenjoker3104/assist-chat/master/plugin_catalog.json"
 MAX_ARCHIVE_BYTES = 700 * 1024 * 1024
-MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 8 * 1024 * 1024 * 1024
 _USER_AGENT = "AssistChat-PluginInstaller"
 _NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 _LATEST_DOWNLOAD_PATTERN = re.compile(
@@ -112,7 +112,9 @@ def download_archive(url: str, destination: Path, timeout: float = 60.0) -> Path
         while chunk := response.read(1024 * 1024):
             total += len(chunk)
             if total > MAX_ARCHIVE_BYTES:
-                raise PluginInstallError("ファイルが大きすぎます（上限300MB）。")
+                raise PluginInstallError(
+                    f"ファイルが大きすぎます（上限{MAX_ARCHIVE_BYTES // (1024 * 1024)}MB）。"
+                )
             output.write(chunk)
     with destination.open("rb") as downloaded:
         if downloaded.read(2) != b"PK":
