@@ -63,7 +63,7 @@ gws auth setup --login
 3. LLMがユーザーの依頼を JSON コマンドに変換し、`action` 名でルーティング
 4. `handler: "plugin"` → マニフェストの `command` テンプレートに従って EXE を直接実行
 5. `handler: "builtin:<method>"` → assist-chat 側の Python メソッドへ委譲（複雑な処理用）
-6. 実行結果を `display` 設定（text / table / articles_table / events_table / progress）に従って表示
+6. 実行結果を `display` 設定（text / table / articles_table / progress）に従って表示
 
 ### 標準モジュール
 

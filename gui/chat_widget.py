@@ -1,7 +1,8 @@
 import html
 import json
 import re
-from datetime import datetime, timedelta
+import threading
+from datetime import datetime
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, QThread, QTimer, Qt, pyqtSignal
@@ -218,12 +219,23 @@ class RoutingThread(QThread):
         self.route_llm.emit(prompt)
 
 
+class ConfirmRequest:
+    """プラグインCLIからの確認要求。メインスレッドで回答を入れ、ワーカースレッドへ通知する。"""
+
+    def __init__(self, title: str, message: str):
+        self.title = title
+        self.message = message
+        self.confirmed = False
+        self.event = threading.Event()
+
+
 class PluginActionThread(QThread):
     """プラグインCLIをバックグラウンドで実行する。CLI からの LLM 依頼はこのスレッド内で処理する。"""
 
     completed = pyqtSignal(dict)
     cancelled = pyqtSignal()
     progress = pyqtSignal(str, str)  # (progress_id, text)
+    confirm_requested = pyqtSignal(object)  # ConfirmRequest
 
     def __init__(self, plugin_manager: PluginManager, plugin, action_def: PluginAction, command: dict, llm: OllamaEngine):
         super().__init__()
@@ -237,6 +249,15 @@ class PluginActionThread(QThread):
         def _progress_cb(pid: str, text: str) -> None:
             self.progress.emit(pid, text)
 
+        def _confirm_cb(title: str, message: str) -> bool:
+            request = ConfirmRequest(title, message)
+            self.confirm_requested.emit(request)
+            # 回答待ち中もキャンセル要求を拾えるよう短い間隔で待つ
+            while not request.event.wait(0.2):
+                if self.isInterruptionRequested():
+                    return False
+            return request.confirmed
+
         result = self.plugin_manager.execute(
             self.plugin,
             self.action_def,
@@ -244,6 +265,7 @@ class PluginActionThread(QThread):
             llm_complete=self.llm.complete,
             is_cancelled=self.isInterruptionRequested,
             progress_callback=_progress_cb,
+            confirm_callback=_confirm_cb,
         )
         if self.isInterruptionRequested():
             self.cancelled.emit()
@@ -832,7 +854,6 @@ class ChatWidget(QWidget):
         self.thinking_bubble = None
         self._streaming_response = ""
         command = self._parse_json(response)
-        command = self._apply_relative_agenda(command)
         try:
             if not command:
                 self._add_bubble("assistant", response)
@@ -882,10 +903,23 @@ class ChatWidget(QWidget):
         self.plugin_thread = PluginActionThread(self.plugin_manager, plugin, action_def, command, self.llm)
         if action_def.display == "progress":
             self.plugin_thread.progress.connect(self._on_plugin_progress)
-        self.plugin_thread.completed.connect(lambda result: self._on_plugin_completed(result, action_def))
+        self.plugin_thread.confirm_requested.connect(self._on_plugin_confirm_requested)
+        self.plugin_thread.completed.connect(lambda result: self._on_plugin_completed(result, plugin, action_def))
         self.plugin_thread.cancelled.connect(self._on_llm_cancelled)
         self.cancel_button.setEnabled(True)
         self.plugin_thread.start()
+
+    def _on_plugin_confirm_requested(self, request: ConfirmRequest):
+        """プラグインCLIからの確認要求をダイアログで尋ね、回答をワーカースレッドへ返す。"""
+        answer = QMessageBox.question(
+            self,
+            request.title or "確認",
+            request.message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        request.confirmed = answer == QMessageBox.StandardButton.Yes
+        request.event.set()
 
     def _on_plugin_progress(self, _pid: str, text: str):
         if not self.plugin_progress_bubble or sip.isdeleted(self.plugin_progress_bubble):
@@ -898,7 +932,7 @@ class ChatWidget(QWidget):
         if row is not None:
             self._request_focus(row)
 
-    def _on_plugin_completed(self, result: dict, action_def: PluginAction):
+    def _on_plugin_completed(self, result: dict, plugin, action_def: PluginAction):
         self._is_streaming = False
         self.thinking_timer.stop()
         if action_def.display == "progress":
@@ -914,7 +948,7 @@ class ChatWidget(QWidget):
                 self.thinking_bubble = None
         self._display_pending = False
         self.plugin_thread = None
-        self._render_plugin_result(result, action_def)
+        self._render_plugin_result(result, plugin, action_def)
         self.send_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
@@ -927,10 +961,6 @@ class ChatWidget(QWidget):
             no_arg[method_name]()
             return
         one_arg = {
-            # Google Calendar (GCalCtrl plugin)
-            "confirm_create": self._confirm_create,
-            "confirm_delete": self._confirm_delete,
-            "confirm_update": self._confirm_update,
             # GetNewTechInfo
             "count_tech_news": self._count_tech_news,
             "search_tech_news": self._search_tech_news,
@@ -951,11 +981,11 @@ class ChatWidget(QWidget):
         else:
             self._add_bubble("assistant", f"未知の内部操作: {method_name}")
 
-    def _render_plugin_result(self, result: dict, action: PluginAction):
+    def _render_plugin_result(self, result: dict, plugin, action: PluginAction):
         """plugin ハンドラの実行結果をマニフェストの display 設定に従って表示する。"""
         if not result.get("ok", True):
             if result.get("auth_required"):
-                self._add_auth_button()
+                self._add_auth_button(plugin)
                 return
             self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
             return
@@ -999,9 +1029,6 @@ class ChatWidget(QWidget):
                 self._add_bubble("assistant", "該当する記事はありません。")
                 return
             self._render_articles_table(articles)
-        elif display == "events_table":
-            field = action.display_field or "items"
-            self._render_events_table(result.get(field, []))
         else:
             self._add_bubble("assistant", json.dumps(result, ensure_ascii=False))
 
@@ -1041,31 +1068,6 @@ class ChatWidget(QWidget):
             + "</table>"
         )
         self._add_bubble("assistant", table_html, is_html=True)
-
-    def _render_events_table(self, items: list):
-        """カレンダーイベントリストをテキストバブルで表示する。"""
-        if not items:
-            self._add_bubble("assistant", "予定はありません。")
-            return
-        lines = [f"予定一覧（{len(items)}件）"]
-        for event in items:
-            start_info = event.get("start", {})
-            end_info = event.get("end", {})
-            if "date" in start_info:
-                when = f"{start_info['date']}（終日）"
-            else:
-                s = self._format_datetime(start_info.get("dateTime"))
-                e = self._format_datetime(end_info.get("dateTime"))
-                when = f"{s} ～ {e}" if e else s
-            title = event.get("summary") or "（タイトルなし）"
-            event_id = event.get("id", "")
-            id_hint = f" [id:{event_id}]" if event_id else ""
-            lines.append(f"・{when}  {title}{id_hint}")
-            if event.get("location"):
-                lines.append(f"  場所: {event['location']}")
-            if event.get("description"):
-                lines.append(f"  詳細: {' '.join(event['description'].split())}")
-        self._add_bubble("assistant", "\n".join(lines))
 
     def _history_prompt(self, current_text: str) -> str:
         if self.history_llm_turns <= 0:
@@ -1456,139 +1458,6 @@ class ChatWidget(QWidget):
         except TechNewsError as exc:
             self._add_bubble("assistant", f"エラー: {exc}")
 
-    def _apply_relative_agenda(self, command: dict | None) -> dict | None:
-        if not any(word in self.last_user_text for word in ("予定", "スケジュール", "カレンダー")):
-            return command
-        today = datetime.now().astimezone().date()
-        base = command if isinstance(command, dict) else {}
-        if "来週" in self.last_user_text and any(word in self.last_user_text for word in ("一週間", "1週間", "一週", "週間")):
-            next_monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
-            return {
-                **base,
-                "action": "agenda",
-                "target_date": None,
-                "start_date": next_monday.isoformat(),
-                "end_date": (next_monday + timedelta(days=7)).isoformat(),
-                "search_query": None,
-            }
-        weekdays = {"月曜": 0, "月曜日": 0, "火曜": 1, "火曜日": 1, "水曜": 2, "水曜日": 2,
-                    "木曜": 3, "木曜日": 3, "金曜": 4, "金曜日": 4, "土曜": 5, "土曜日": 5,
-                    "日曜": 6, "日曜日": 6}
-        weekday_name = next((name for name in weekdays if name in self.last_user_text), None)
-        if weekday_name is None:
-            return command
-        days_ahead = (weekdays[weekday_name] - today.weekday()) % 7
-        if days_ahead == 0 and any(word in self.last_user_text for word in ("今度の", "次の")):
-            days_ahead = 7
-        target = today + timedelta(days=days_ahead)
-        return {**base, "action": "agenda", "target_date": target.isoformat(), "start_date": None, "end_date": None}
-
-    def _confirm_create(self, command: dict):
-        events = command.get("events")
-        if not isinstance(events, list) or not events:
-            events = [command]
-        events = [e for e in events if isinstance(e, dict)]
-        if not events:
-            self._add_bubble("assistant", "登録する予定を解釈できませんでした。")
-            return
-        lines = []
-        for index, event in enumerate(events, 1):
-            title = event.get("title", "無題")
-            suffix = "（終日）" if event.get("all_day") else ""
-            lines.append(f"{index}. {title}\n   {event.get('start', '')} ～ {event.get('end', '')}{suffix}")
-        answer = QMessageBox.question(
-            self, "予定を追加",
-            f"次の{len(events)}件の予定を追加しますか？\n\n" + "\n".join(lines),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self._add_bubble("assistant", "追加をキャンセルしました。")
-            return
-        found = self.plugin_manager.find("create") if self.plugin_manager else None
-        if not found:
-            self._add_bubble("assistant", "Googleカレンダープラグインが見つかりません。")
-            return
-        plugin, _ = found
-        result = self.plugin_manager.execute_raw(
-            plugin, ["create"], ["--events-json", json.dumps(events, ensure_ascii=False)]
-        )
-        if result.get("ok"):
-            self._add_bubble("assistant", f"{result.get('created', len(events))}件の予定を追加しました。")
-        elif result.get("auth_required"):
-            self._add_auth_button()
-        else:
-            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
-
-    def _confirm_delete(self, command: dict):
-        event_id = command.get("event_id", "")
-        answer = QMessageBox.question(
-            self, "予定を削除", f"イベントID {event_id} の予定を削除しますか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self._add_bubble("assistant", "削除をキャンセルしました。")
-            return
-        found = self.plugin_manager.find("delete") if self.plugin_manager else None
-        if not found:
-            self._add_bubble("assistant", "Googleカレンダープラグインが見つかりません。")
-            return
-        plugin, _ = found
-        result = self.plugin_manager.execute_raw(plugin, ["delete"], ["--event-id", event_id])
-        if result.get("ok"):
-            self._add_bubble("assistant", "予定を削除しました。")
-        elif result.get("auth_required"):
-            self._add_auth_button()
-        else:
-            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
-
-    def _confirm_update(self, command: dict):
-        event_id = command.get("event_id", "")
-        if not event_id:
-            self._add_bubble("assistant", "event_idが指定されていません。先にagendaで予定を確認してください。")
-            return
-        changes = {k: v for k, v in {
-            "title": command.get("title"),
-            "start": command.get("start"),
-            "end": command.get("end"),
-            "description": command.get("description"),
-        }.items() if v is not None}
-        if not changes:
-            self._add_bubble("assistant", "変更する内容が指定されていません。")
-            return
-        lines = []
-        if "title" in changes:
-            lines.append(f"タイトル: {changes['title']}")
-        if "start" in changes:
-            lines.append(f"開始: {changes['start']}")
-        if "end" in changes:
-            lines.append(f"終了: {changes['end']}")
-        if "description" in changes:
-            lines.append(f"詳細: {changes['description']}")
-        answer = QMessageBox.question(
-            self, "予定を変更",
-            f"イベント {event_id} を次のように変更しますか？\n\n" + "\n".join(lines),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self._add_bubble("assistant", "変更をキャンセルしました。")
-            return
-        found = self.plugin_manager.find("update") if self.plugin_manager else None
-        if not found:
-            self._add_bubble("assistant", "Googleカレンダープラグインが見つかりません。")
-            return
-        plugin, _ = found
-        args = ["--event-id", event_id]
-        for flag, key in [("--title", "title"), ("--start", "start"), ("--end", "end"), ("--description", "description")]:
-            if key in changes:
-                args += [flag, str(changes[key])]
-        result = self.plugin_manager.execute_raw(plugin, ["update"], args)
-        if result.get("ok"):
-            self._add_bubble("assistant", "予定を変更しました。")
-        elif result.get("auth_required"):
-            self._add_auth_button()
-        else:
-            self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
-
     def _switch_model(self, command: dict):
         model = command.get("model", "").strip()
         if not model:
@@ -1631,33 +1500,31 @@ class ChatWidget(QWidget):
         else:
             self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
 
-    def _add_auth_button(self):
+    def _add_auth_button(self, plugin):
+        """認証が必要なときのボタン。プラグインが login を宣言していなければ案内文のみ出す。"""
+        if not plugin.login_subcommands:
+            self._add_bubble("assistant", f"{plugin.name} の認証が必要です。プラグインの設定を確認してください。")
+            return
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("Googleアカウントの認証が必要です。")
+        label = QLabel(f"{plugin.name} の認証が必要です。")
         label.setStyleSheet("background:#313244; color:#cdd6f4; border-radius:12px; padding:10px 14px;")
-        btn = QPushButton("Google認証を開く")
+        btn = QPushButton(plugin.login_label)
         btn.setStyleSheet("background:#a6e3a1; color:#1e1e2e; border-radius:8px; padding:6px 12px;")
-        btn.clicked.connect(self._do_auth_login)
+        btn.clicked.connect(lambda _checked=False, p=plugin: self._do_plugin_login(p))
         row_layout.addWidget(label)
         row_layout.addWidget(btn)
         row_layout.addStretch()
         self.message_layout.addWidget(row)
         self._request_focus(row)
 
-    def _do_auth_login(self):
-        found = self.plugin_manager.find("agenda") if self.plugin_manager else None
-        if not found:
-            self._add_bubble("assistant", "Googleカレンダープラグインが見つかりません。")
-            return
-        plugin, _ = found
-        result = self.plugin_manager.execute_raw(plugin, ["auth"], [])
+    def _do_plugin_login(self, plugin):
+        result = self.plugin_manager.execute_raw(plugin, plugin.login_subcommands, [])
         if result.get("ok"):
-            self._add_bubble("assistant", "ブラウザでGoogleアカウントにログインしてください。完了後、再度お試しください。")
+            self._add_bubble("assistant", result.get("message", "ブラウザでログインしてください。完了後、再度お試しください。"))
         else:
             self._add_bubble("assistant", f"認証の起動に失敗しました: {result.get('error', '')}")
-
     def _confirm_draft_create(self, command: dict):
         to = command.get("to", "")
         subject = command.get("subject", "")
@@ -1682,7 +1549,7 @@ class ChatWidget(QWidget):
         if result.get("ok"):
             self._add_bubble("assistant", result.get("message", "下書きを作成しました。"))
         elif result.get("auth_required"):
-            self._add_auth_button()
+            self._add_auth_button(plugin)
         else:
             self._add_bubble("assistant", f"エラー: {result.get('error', '不明なエラー')}")
 
@@ -1798,16 +1665,6 @@ class ChatWidget(QWidget):
     def _animate_thinking(self):
         self.thinking_frame = (self.thinking_frame + 1) % 4
         self.thinking_bubble.setText("・" * (self.thinking_frame + 1))
-
-    @staticmethod
-    def _format_datetime(value: str | None) -> str:
-        if not value:
-            return "日時不明"
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed.astimezone().strftime("%m/%d %H:%M")
-        except ValueError:
-            return value
 
     @staticmethod
     def _parse_json(response: str) -> dict | None:

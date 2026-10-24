@@ -65,6 +65,14 @@
   "description": "モジュールの説明",
   "executable": "ModuleCli.exe",         // plugin/<ModuleName>/ 以下の相対パス
   "preserve": ["config.json"],           // 省略可。更新時に上書き・削除しないファイル/フォルダ（相対パス）
+  "login": {                             // 省略可。認証が必要なときチャットに出す「認証を開く」ボタン
+    "subcommands": ["auth"],             // ボタン押下時に executable へ渡すサブコマンド
+    "label": "Google認証を開く"            // ボタンのラベル（省略時は「認証を開く」）
+  },
+  "watch": {                             // 省略可。定期実行して通知を表示する（例: リマインダー）
+    "subcommands": ["remind"],           // 定期実行するサブコマンド（結果の notices を表示）
+    "interval_minutes": 5                // 実行間隔（分、省略時5）
+  },
   "actions": [
     {
       "action": "action_name",           // LLMが返すJSONの "action" 値
@@ -78,10 +86,11 @@
           { "type": "flag",       "flag": "--limit", "param": "limit", "default": 10, "min": 1, "max": 100 },
           { "type": "flag",       "flag": "--source", "param": "source", "omit_if_null": true },
           { "type": "bool_flag",  "flag": "--unread", "param": "unread" }
+          // flag の値が配列・オブジェクトの場合は JSON 文字列（ensure_ascii=False）として渡される
         ]
       },
       "handler": "plugin",              // "plugin"=汎用CLI実行 / "builtin:<method>"=Python委譲
-      "display": "text",                // "text" | "table" | "articles_table" | "events_table" | "progress"
+      "display": "text",                // "text" | "table" | "articles_table" | "progress"
       "display_template": "結果: {field}",  // display=text 時のテンプレート（省略可）
       "display_field": "items",         // display=table/articles_table 時に使うJSONフィールド名
       "display_columns": ["col1","col2"],// display=table 時に表示するカラム（省略=全列）
@@ -112,6 +121,24 @@ CLIがLLMへ問い合わせて結果を加工したい場合は、stdoutへ次�
 - LLM接続が無い場合やLLMがエラーを返した場合も `llm_response` が返るので、CLIはエラーとして処理すること。
 - プラグイン実行はバックグラウンドスレッドで行われ、LLM待ちの間もUIは操作可能。キャンセルでCLIは強制終了される。
 
+### 確認ダイアログ（confirm・任意・`handler: "plugin"` のみ）
+
+破壊的な操作（削除・変更など）の前にユーザーへ確認したい場合は、CLIがstdoutへ次の制御行を出力する。
+
+- CLI → ホスト（stdout）: `{"type": "confirm", "id": "<任意の文字列>", "title": "ダイアログ見出し", "message": "本文"}`
+- ホスト → CLI（stdin、1行のJSON）: `{"type": "confirm_response", "id": "<同じid>", "confirmed": true}`（「はい」）または `false`（「いいえ」・キャンセル時）
+
+- ホストはQMessageBoxで「はい／いいえ」を表示する。ユーザーの回答待ちはCLIの実行タイムアウトに含めない。
+- CLIは `confirmed` が false のとき、実行せずに `{"ok": true, "message": "キャンセルしました。"}` などを返す（`display: "text"` + `display_template: "{message}"` で表示できる）。
+- 確認の回答を受け取れないホスト経路（`execute_raw`）では `confirmed` は常に false として扱われる。
+
+### 認証（login）と通知（watch）
+
+- `login`: 認証が必要な結果（`{"ok": false, "auth_required": true}`）を受けると、`login.label` のボタンを表示する。押下で `login.subcommands` を実行する。`login` が無いプラグインは案内文だけを表示する。
+- `watch`: 起動時と `interval_minutes` ごとに `watch.subcommands` を実行する（バックグラウンド）。結果の `notices` を表示する。
+  - `notices` は `[{"key": "一意キー", "text": "表示する文章"}]`。同じ `key` は一度だけ表示する（プラグイン名とキーの組で重複排除）。
+  - `auth_required` が返ったら `login` ボタンを表示する（同じプラグインの認証案内は繰り返し出さない）。
+
 ### handler の種類
 
 | 値 | 動作 |
@@ -126,9 +153,8 @@ CLIがLLMへ問い合わせて結果を加工したい場合は、stdoutへ次�
 | display | 表示方式 | 必須フィールド |
 |---|---|---|
 | `"text"` | `display_template` を結果JSONの値で置換してバブル表示 | `display_template`（省略時はJSON文字列） |
-| `"table"` | `display_field` のリストを `display_columns` でHTMLテーブル表示 | `display_field`, `display_columns` |
+| `"table"` | `display_field` のリストを `display_columns` でHTMLテーブル表示（各行の辞書キーは列名と一致させる） | `display_field`, `display_columns` |
 | `"articles_table"` | 記事専用レンダラー（ソース別見出し＋タイトルリンク） | `display_field` |
-| `"events_table"` | カレンダー予定専用レンダラー（日付・時刻・タイトル表示） | `display_field` |
 | `"progress"` | スレッド進捗バブル（builtin専用） | — |
 
 ### モジュール提供者の責任

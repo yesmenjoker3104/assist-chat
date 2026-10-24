@@ -189,54 +189,47 @@ class MainWindow(QMainWindow):
             tech_news_auto_fetch_minutes=settings.get("tech_news_auto_fetch_minutes", 30),
         )
         self.setCentralWidget(self.chat)
-        self._notified_event_ids: set[str] = set()
-        self._reminder_timer = QTimer(self)
-        self._reminder_timer.setInterval(5 * 60 * 1000)
-        self._reminder_timer.timeout.connect(self._check_upcoming_events)
-        self._reminder_timer.start()
-        # GCalCtrl プラグインが読み込まれていれば起動時に認証状態を確認する
-        self._check_gcal_auth()
+        self._watch_workers: dict[str, CallWorker] = {}
+        self._watch_last_run: dict[str, float] = {}
+        self._shown_notice_keys: set[str] = set()
+        self._auth_prompted: set[str] = set()
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(60 * 1000)
+        self._watch_timer.timeout.connect(self._run_due_watchers)
+        self._watch_timer.start()
+        self._run_due_watchers()
 
-    def _check_gcal_auth(self):
-        found = self.plugin_manager.find("agenda")
-        if not found:
-            return
-        plugin, action_def = found
-        result = self.plugin_manager.execute(plugin, action_def, {})
-        if not result.get("ok") and result.get("auth_required"):
-            self.chat._add_auth_button()
+    def _run_due_watchers(self):
+        """manifest の watch 設定に従い、期限が来たプラグインの監視コマンドをバックグラウンドで実行する。"""
+        now = time.monotonic()
+        for plugin in self.plugin_manager.plugins:
+            watch = plugin.watch
+            if watch is None or plugin.name in self._watch_workers:
+                continue
+            last = self._watch_last_run.get(plugin.name)
+            if last is not None and now - last < watch.interval_minutes * 60:
+                continue
+            self._watch_last_run[plugin.name] = now
+            worker = CallWorker(lambda p=plugin, w=watch: self.plugin_manager.execute_raw(p, w.subcommands, []), self)
+            worker.done.connect(lambda result, p=plugin: self._on_watch_result(p, result))
+            worker.finished.connect(lambda name=plugin.name: self._watch_workers.pop(name, None))
+            self._watch_workers[plugin.name] = worker
+            worker.start()
 
-    def _check_upcoming_events(self):
-        found = self.plugin_manager.find("agenda")
-        if not found:
-            return
-        plugin, action_def = found
-        from datetime import datetime, timezone
-        today = datetime.now().strftime("%Y-%m-%d")
-        result = self.plugin_manager.execute(plugin, action_def, {"target_date": today})
+    def _on_watch_result(self, plugin, result: dict):
         if not result.get("ok"):
+            if result.get("auth_required") and plugin.name not in self._auth_prompted:
+                self._auth_prompted.add(plugin.name)
+                self.chat._add_auth_button(plugin)
             return
-        now = datetime.now().astimezone()
-        for event in result.get("items", []):
-            eid = event.get("id", "")
-            if not eid or eid in self._notified_event_ids:
+        self._auth_prompted.discard(plugin.name)
+        for notice in result.get("notices", []):
+            key = f"{plugin.name}:{notice.get('key', '')}"
+            text = notice.get("text", "")
+            if not text or key in self._shown_notice_keys:
                 continue
-            dt_str = event.get("start", {}).get("dateTime")
-            if not dt_str:
-                continue
-            try:
-                start_dt = datetime.fromisoformat(dt_str)
-                if start_dt.tzinfo is None:
-                    start_dt = start_dt.replace(tzinfo=timezone.utc)
-                diff = (start_dt - now).total_seconds()
-                if 0 <= diff <= 15 * 60:
-                    title = event.get("summary", "（タイトルなし）")
-                    mins = int(diff / 60)
-                    self.chat._add_bubble("assistant", f"⏰ リマインダー: 「{title}」まであと{mins}分です。")
-                    self._notified_event_ids.add(eid)
-            except (ValueError, TypeError):
-                continue
-
+            self._shown_notice_keys.add(key)
+            self.chat._add_bubble("assistant", text)
     def install_plugin_from_url(self):
         url, ok = QInputDialog.getText(
             self, "URLからプラグインを導入", "プラグインZIPのURL（https://で始まるもの）:"
@@ -692,5 +685,8 @@ class MainWindow(QMainWindow):
         self._update_worker = None
 
     def closeEvent(self, event):
+        self._watch_timer.stop()
+        for worker in list(self._watch_workers.values()):
+            worker.wait()
         self.stop_ollama()
         super().closeEvent(event)

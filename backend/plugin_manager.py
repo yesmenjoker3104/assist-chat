@@ -27,7 +27,7 @@ def _pump_lines(stream, out: queue.Queue) -> None:
 
 
 def _parse_control_line(line: str) -> dict | None:
-    """llm_request / progress 制御行なら dict を返す。通常の出力行なら None。"""
+    """llm_request / progress / confirm 制御行なら dict を返す。通常の出力行なら None。"""
     stripped = line.strip()
     if not stripped.startswith("{"):
         return None
@@ -35,7 +35,7 @@ def _parse_control_line(line: str) -> dict | None:
         data = json.loads(stripped)
     except json.JSONDecodeError:
         return None
-    if isinstance(data, dict) and data.get("type") in ("llm_request", "progress"):
+    if isinstance(data, dict) and data.get("type") in ("llm_request", "progress", "confirm"):
         return data
     return None
 
@@ -58,12 +58,19 @@ class PluginAction:
     command_args: list[dict]
     # "plugin" = generic executor  /  "builtin:<method>" = delegate to Python
     handler: str
-    display: str          # "text" | "table" | "articles_table" | "events_table" | "progress"
+    display: str          # "text" | "table" | "articles_table" | "progress"
     display_field: str | None
     display_template: str | None
     display_columns: list[str] | None
     display_link_column: str | None
     display_url_column: str | None
+
+
+@dataclass
+class PluginWatch:
+    """定期実行して通知を表示するサブコマンド（manifest の "watch"）。"""
+    subcommands: list[str]
+    interval_minutes: int
 
 
 @dataclass
@@ -77,6 +84,10 @@ class Plugin:
     env_vars: dict[str, str] = field(default_factory=dict)
     # Relative paths or folder names that updates must neither overwrite nor delete
     preserve: list[str] = field(default_factory=list)
+    # 認証が必要なときにチャットへ出すボタンが実行するサブコマンド（manifest の "login"）
+    login_subcommands: list[str] | None = None
+    login_label: str = "認証を開く"
+    watch: PluginWatch | None = None
 
     @classmethod
     def load(cls, plugin_dir: Path) -> "Plugin":
@@ -100,6 +111,8 @@ class Plugin:
             )
             for a in data.get("actions", [])
         ]
+        login = data.get("login")
+        watch = data.get("watch")
         return cls(
             name=data.get("name", plugin_dir.name),
             version=data.get("version", ""),
@@ -108,6 +121,12 @@ class Plugin:
             actions=actions,
             env_vars=data.get("env_vars", {}),
             preserve=[str(p) for p in data.get("preserve", [])],
+            login_subcommands=list(login["subcommands"]) if login else None,
+            login_label=login.get("label", "認証を開く") if login else "認証を開く",
+            watch=PluginWatch(
+                subcommands=list(watch["subcommands"]),
+                interval_minutes=max(1, int(watch.get("interval_minutes", 5))),
+            ) if watch else None,
         )
 
 
@@ -173,6 +192,7 @@ class PluginManager:
         llm_complete: Callable[[str], str] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         progress_callback: Callable[[str, str], None] | None = None,
+        confirm_callback: Callable[[str, str], bool] | None = None,
     ) -> dict:
         """CLI を実行し、stdout の最終 JSON を返す。
 
@@ -180,6 +200,8 @@ class PluginManager:
         `{"type": "llm_response", "id", "text"|"error"}` を stdin へ 1 行で返す。
         stdout に `{"type": "progress", "id", "text"}` の行があれば progress_callback を呼び、
         `{"type": "progress_ack", "id"}` を stdin へ返す。
+        stdout に `{"type": "confirm", "id", "title", "message"}` の行があれば confirm_callback で
+        ユーザーに確認し、`{"type": "confirm_response", "id", "confirmed"}` を stdin へ返す。
         それ以外の出力は従来どおり結果 JSON として扱う。
         """
         try:
@@ -230,6 +252,24 @@ class PluginManager:
                     ack = {"type": "progress_ack", "id": ctrl.get("id", "")}
                     try:
                         process.stdin.write(json.dumps(ack, ensure_ascii=True) + "\n")
+                        process.stdin.flush()
+                    except (OSError, ValueError):
+                        pass
+                    continue
+
+                if ctrl.get("type") == "confirm":
+                    started = time.monotonic()
+                    confirmed = False
+                    if confirm_callback:
+                        try:
+                            confirmed = bool(confirm_callback(str(ctrl.get("title", "")), str(ctrl.get("message", ""))))
+                        except Exception:
+                            confirmed = False
+                    # ユーザーの回答待ちは CLI のタイムアウトに含めない
+                    deadline += time.monotonic() - started
+                    reply = {"type": "confirm_response", "id": ctrl.get("id", ""), "confirmed": confirmed}
+                    try:
+                        process.stdin.write(json.dumps(reply, ensure_ascii=True) + "\n")
                         process.stdin.flush()
                     except (OSError, ValueError):
                         pass
@@ -286,11 +326,12 @@ class PluginManager:
         llm_complete: Callable[[str], str] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         progress_callback: Callable[[str, str], None] | None = None,
+        confirm_callback: Callable[[str, str], bool] | None = None,
     ) -> dict:
         """Build CLI args from manifest + params, run the executable, return parsed JSON."""
         args = self._build_args(action, params)
         cmd = [str(plugin.executable)] + action.command_subcommands + args
-        return self._run(plugin, cmd, llm_complete, is_cancelled, progress_callback)
+        return self._run(plugin, cmd, llm_complete, is_cancelled, progress_callback, confirm_callback)
 
     def execute_raw(self, plugin: Plugin, subcommands: list[str], args: list[str]) -> dict:
         """Execute plugin CLI with explicit subcommands and args, bypassing manifest arg mapping."""
@@ -328,7 +369,9 @@ class PluginManager:
                             value = v
                         except (ValueError, TypeError):
                             value = arg.get("default", value)
-                    args.extend([arg["flag"], str(value)])
+                    # Lists/dicts are passed as JSON so the CLI can parse them
+                    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
+                    args.extend([arg["flag"], text])
             elif t == "bool_flag":
                 if params.get(arg.get("param", ""), False):
                     args.append(arg["flag"])
